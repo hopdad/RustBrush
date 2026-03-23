@@ -3633,6 +3633,7 @@ dependencies = [
  "env_logger",
  "image 0.25.10",
  "log",
+ "portable-atomic",
  "rfd",
  "rustbrush-core",
  "rustbrush-platform",

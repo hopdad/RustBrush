@@ -382,6 +382,7 @@ fn main() {
         save_interval: if cli.save_session { 500 } else { 0 },
         session_path: session_path.clone(),
         progress_interval: 500,
+        progress_tx: None,
     };
 
     let result = executor::execute_plan(
@@ -466,6 +467,7 @@ fn resume_session(resume_path: &PathBuf, cli: &Cli) {
         save_interval: 500,
         session_path: Some(resume_path.clone()),
         progress_interval: 500,
+        progress_tx: None,
     };
 
     let result = executor::execute_plan(

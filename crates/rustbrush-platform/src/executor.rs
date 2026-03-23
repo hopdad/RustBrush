@@ -7,7 +7,18 @@ use crate::hotkey::PaintControl;
 use crate::input::InputDriver;
 use rustbrush_core::painting::{PaintCommand, PaintPlan};
 use rustbrush_core::session::Session;
+use std::sync::mpsc;
 use std::time::Duration;
+
+/// Progress update sent from executor to GUI.
+#[derive(Debug, Clone)]
+pub struct ProgressUpdate {
+    pub commands_executed: usize,
+    pub total_commands: usize,
+    pub percent: f64,
+    pub current_color: Option<String>,
+    pub paused: bool,
+}
 
 /// Result of plan execution.
 pub enum ExecutionResult {
@@ -32,6 +43,8 @@ pub struct ExecutorConfig {
     pub session_path: Option<std::path::PathBuf>,
     /// How often to report progress (every N commands).
     pub progress_interval: usize,
+    /// Optional channel to send progress updates to the GUI.
+    pub progress_tx: Option<mpsc::Sender<ProgressUpdate>>,
 }
 
 impl Default for ExecutorConfig {
@@ -40,6 +53,7 @@ impl Default for ExecutorConfig {
             save_interval: 500,
             session_path: None,
             progress_interval: 500,
+            progress_tx: None,
         }
     }
 }
@@ -57,10 +71,22 @@ pub fn execute_plan(
 ) -> ExecutionResult {
     let total = plan.commands.len();
     let mut executed = 0usize;
+    let mut current_color: Option<String> = None;
 
     for i in start_index..total {
         // Check pause/cancel
+        let is_paused = control.paused.load(portable_atomic::Ordering::Relaxed);
         if !control.check() {
+            // Send cancelled update
+            if let Some(ref tx) = config.progress_tx {
+                let _ = tx.send(ProgressUpdate {
+                    commands_executed: executed,
+                    total_commands: total,
+                    percent: executed as f64 / total as f64 * 100.0,
+                    current_color: current_color.clone(),
+                    paused: false,
+                });
+            }
             if let (Some(session), Some(path)) = (&session, &config.session_path) {
                 let _ = session.save(path);
             }
@@ -68,6 +94,11 @@ pub fn execute_plan(
                 commands_executed: executed,
                 total_commands: total,
             };
+        }
+
+        // Track current color
+        if let PaintCommand::SelectColorByHex { hex } = &plan.commands[i] {
+            current_color = Some(hex.clone());
         }
 
         let cmd = &plan.commands[i];
@@ -98,6 +129,17 @@ pub fn execute_plan(
         if config.progress_interval > 0 && executed % config.progress_interval == 0 {
             let pct = (i + 1) as f64 / total as f64 * 100.0;
             println!("  Progress: {}/{} ({:.1}%)", i + 1, total, pct);
+
+            // Send progress via channel
+            if let Some(ref tx) = config.progress_tx {
+                let _ = tx.send(ProgressUpdate {
+                    commands_executed: i + 1,
+                    total_commands: total,
+                    percent: pct,
+                    current_color: current_color.clone(),
+                    paused: is_paused,
+                });
+            }
         }
     }
 
@@ -105,6 +147,17 @@ pub fn execute_plan(
     if let (Some(session), Some(path)) = (session, &config.session_path) {
         session.progress = total;
         let _ = session.save(path);
+    }
+
+    // Send final progress
+    if let Some(ref tx) = config.progress_tx {
+        let _ = tx.send(ProgressUpdate {
+            commands_executed: total,
+            total_commands: total,
+            percent: 100.0,
+            current_color,
+            paused: false,
+        });
     }
 
     ExecutionResult::Completed {
@@ -176,6 +229,7 @@ mod tests {
             save_interval: 0,
             session_path: None,
             progress_interval: 0,
+            progress_tx: None,
         };
 
         let result = execute_plan(&plan, &mut input, &control, &config, None, 0);
@@ -200,6 +254,7 @@ mod tests {
             save_interval: 0,
             session_path: None,
             progress_interval: 0,
+            progress_tx: None,
         };
 
         // Resume from command index 4

@@ -9,8 +9,13 @@ use rustbrush_core::color::{
 use rustbrush_core::config::Config;
 use rustbrush_core::image as rb_image;
 use rustbrush_core::painting::{self, ColorGroup, PaintPlan, PaintStrategy, ScreenRect};
+use rustbrush_core::session::Session;
+use rustbrush_platform::executor::{self, ExecutionResult, ExecutorConfig, ProgressUpdate};
+use rustbrush_platform::hotkey::PaintControl;
+use rustbrush_platform::input::{InputDriver, SafeInput};
+use portable_atomic::Ordering;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 fn main() -> eframe::Result {
@@ -83,6 +88,20 @@ struct RustBrushApp {
     status_message: String,
     processing: bool,
     paint_plan: Option<PaintPlan>,
+
+    // Painting execution state
+    painting_active: bool,
+    paint_control: Option<Arc<PaintControl>>,
+    paint_progress_rx: Option<mpsc::Receiver<ProgressUpdate>>,
+    paint_result_rx: Option<mpsc::Receiver<ExecutionResult>>,
+    paint_progress: Option<ProgressUpdate>,
+    countdown_start: Option<Instant>,
+    session_path: Option<PathBuf>,
+
+    // Canvas region (screen coordinates for painting)
+    canvas_region: Option<ScreenRect>,
+    hex_field_pos: Option<(i32, i32)>,
+    resume_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +257,18 @@ impl RustBrushApp {
             status_message: "Load an image to get started.".to_string(),
             processing: false,
             paint_plan: None,
+
+            painting_active: false,
+            paint_control: None,
+            paint_progress_rx: None,
+            paint_result_rx: None,
+            paint_progress: None,
+            countdown_start: None,
+            session_path: None,
+
+            canvas_region: None,
+            hex_field_pos: None,
+            resume_index: 0,
         }
     }
 
@@ -497,6 +528,127 @@ impl RustBrushApp {
             });
         });
     }
+
+    /// Start a 3-second countdown, then begin painting.
+    fn start_painting_countdown(&mut self) {
+        self.countdown_start = Some(Instant::now());
+        self.status_message = "Starting in 3... Switch to the game now!".to_string();
+    }
+
+    /// Actually launch the painter worker thread.
+    fn start_painting(&mut self) {
+        let Some(ref plan) = self.paint_plan else {
+            self.status_message = "Generate a plan first.".to_string();
+            return;
+        };
+        let Some(canvas_region) = self.canvas_region else {
+            self.status_message = "Set the canvas region first.".to_string();
+            return;
+        };
+
+        let control = Arc::new(PaintControl::new());
+        control.start_listener();
+        self.paint_control = Some(control.clone());
+
+        let plan = plan.clone();
+        let delay_ms = self.delay_ms;
+        let save_session = self.save_session;
+        let hex_input = self.hex_input || self.adaptive_palette;
+
+        // Set up session
+        let image_path_str = self.image_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let session_path = if save_session {
+            let p = Session::generate_path(&image_path_str);
+            self.session_path = Some(p.clone());
+            Some(p)
+        } else {
+            None
+        };
+
+        let mut session = Session::new(
+            plan.clone(),
+            canvas_region,
+            image_path_str,
+            self.canvas_width(),
+            self.canvas_height(),
+        );
+        session.progress = self.resume_index;
+
+        // Progress channel
+        let (progress_tx, progress_rx) = mpsc::channel();
+        self.paint_progress_rx = Some(progress_rx);
+
+        // Result channel
+        let (result_tx, result_rx) = mpsc::channel();
+        self.paint_result_rx = Some(result_rx);
+
+        self.painting_active = true;
+        self.paint_progress = None;
+        self.status_message = "Painting... F10=pause, ESC=cancel".to_string();
+
+        let start_index = self.resume_index;
+        self.resume_index = 0; // reset for next time
+
+        let hex_field_pos = self.hex_field_pos;
+
+        std::thread::spawn(move || {
+            // Initial delay to let user switch to game
+            std::thread::sleep(Duration::from_millis(500));
+
+            let mut input = match SafeInput::new(Duration::from_millis(delay_ms as u64)) {
+                Ok(input) => input,
+                Err(e) => {
+                    let _ = result_tx.send(ExecutionResult::Error {
+                        commands_executed: 0,
+                        error: e,
+                    });
+                    return;
+                }
+            };
+            // If hex input and hex field position set, click it first
+            if hex_input {
+                if let Some((hx, hy)) = hex_field_pos {
+                    let _ = input.move_to(hx, hy);
+                }
+            }
+
+            let config = ExecutorConfig {
+                save_interval: if save_session { 500 } else { 0 },
+                session_path,
+                progress_interval: 100,
+                progress_tx: Some(progress_tx),
+            };
+
+            let result = executor::execute_plan(
+                &plan, &mut input, &control, &config,
+                Some(&mut session), start_index,
+            );
+
+            let _ = result_tx.send(result);
+        });
+    }
+
+    fn stop_painting(&mut self) {
+        if let Some(ref control) = self.paint_control {
+            control.cancelled.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn toggle_pause(&mut self) {
+        if let Some(ref control) = self.paint_control {
+            control.paused.fetch_xor(true, Ordering::Relaxed);
+        }
+    }
+
+    fn is_paused(&self) -> bool {
+        self.paint_control
+            .as_ref()
+            .map(|c| c.paused.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    }
 }
 
 impl eframe::App for RustBrushApp {
@@ -544,8 +696,65 @@ impl eframe::App for RustBrushApp {
             self.start_background_process();
         }
 
-        // Keep polling while background task is active
-        if self.bg_result_rx.is_some() {
+        // Poll painting progress
+        if let Some(ref rx) = self.paint_progress_rx {
+            // Drain all pending updates, keep the latest
+            while let Ok(update) = rx.try_recv() {
+                self.paint_progress = Some(update);
+            }
+        }
+
+        // Poll painting result (completion/cancellation/error)
+        if let Some(ref rx) = self.paint_result_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.painting_active = false;
+                self.paint_result_rx = None;
+                self.paint_progress_rx = None;
+                self.paint_control = None;
+
+                match result {
+                    ExecutionResult::Completed { commands_executed } => {
+                        self.status_message = format!(
+                            "Painting complete! {} commands executed.", commands_executed
+                        );
+                        // Clean up session file on success
+                        if let Some(ref path) = self.session_path {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        self.session_path = None;
+                    }
+                    ExecutionResult::Cancelled { commands_executed, total_commands } => {
+                        self.status_message = format!(
+                            "Painting cancelled at {}/{}.", commands_executed, total_commands
+                        );
+                    }
+                    ExecutionResult::Error { commands_executed, error } => {
+                        self.status_message = format!(
+                            "Painting error after {} commands: {}", commands_executed, error
+                        );
+                    }
+                }
+                self.paint_progress = None;
+            }
+        }
+
+        // Countdown timer
+        if let Some(start) = self.countdown_start {
+            let elapsed = start.elapsed();
+            if elapsed >= Duration::from_secs(3) {
+                self.countdown_start = None;
+                self.start_painting();
+            } else {
+                let remaining = 3 - elapsed.as_secs();
+                self.status_message = format!(
+                    "Starting in {}... Switch to the game now!", remaining
+                );
+                ctx.request_repaint_after(Duration::from_millis(200));
+            }
+        }
+
+        // Keep polling while background task or painting is active
+        if self.bg_result_rx.is_some() || self.painting_active {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 
@@ -770,8 +979,9 @@ impl RustBrushApp {
 
         let has_image = self.source_image.is_some();
         let has_groups = self.paint_groups.is_some();
+        let has_plan = self.paint_plan.is_some();
 
-        ui.add_enabled_ui(has_image && !self.processing, |ui| {
+        ui.add_enabled_ui(has_image && !self.processing && !self.painting_active, |ui| {
             if ui
                 .button("Reprocess Now")
                 .on_hover_text("Manually re-run image processing")
@@ -781,7 +991,7 @@ impl RustBrushApp {
             }
         });
 
-        ui.add_enabled_ui(has_groups, |ui| {
+        ui.add_enabled_ui(has_groups && !self.painting_active, |ui| {
             if ui
                 .button("Generate Plan")
                 .on_hover_text("Create the painting command plan")
@@ -804,6 +1014,134 @@ impl RustBrushApp {
             ));
         }
 
+        // --- Canvas Region Setup ---
+        if has_plan && !self.painting_active {
+            ui.separator();
+            ui.heading("Paint Setup");
+
+            // Manual canvas region input
+            ui.label("Canvas region (screen coords):");
+            let mut region = self.canvas_region.unwrap_or(ScreenRect {
+                x: 0, y: 0, width: 800, height: 600,
+            });
+            let mut region_changed = false;
+            ui.horizontal(|ui| {
+                ui.label("X:");
+                region_changed |= ui.add(egui::DragValue::new(&mut region.x)).changed();
+                ui.label("Y:");
+                region_changed |= ui.add(egui::DragValue::new(&mut region.y)).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("W:");
+                region_changed |= ui.add(
+                    egui::DragValue::new(&mut region.width).range(10..=4096u32)
+                ).changed();
+                ui.label("H:");
+                region_changed |= ui.add(
+                    egui::DragValue::new(&mut region.height).range(10..=4096u32)
+                ).changed();
+            });
+            if region_changed || self.canvas_region.is_none() {
+                self.canvas_region = Some(region);
+            }
+
+            if self.hex_input || self.adaptive_palette {
+                ui.label("Hex input field position:");
+                let mut pos = self.hex_field_pos.unwrap_or((0, 0));
+                ui.horizontal(|ui| {
+                    ui.label("X:");
+                    ui.add(egui::DragValue::new(&mut pos.0));
+                    ui.label("Y:");
+                    ui.add(egui::DragValue::new(&mut pos.1));
+                });
+                self.hex_field_pos = Some(pos);
+            }
+
+            ui.separator();
+
+            // Start painting button
+            let can_start = self.canvas_region.is_some()
+                && self.countdown_start.is_none();
+            ui.add_enabled_ui(can_start, |ui| {
+                if ui
+                    .button("Start Painting (3s countdown)")
+                    .on_hover_text("Starts a 3-second countdown, then begins painting. Switch to the game!")
+                    .clicked()
+                {
+                    self.start_painting_countdown();
+                }
+            });
+
+            if self.countdown_start.is_some() {
+                ui.spinner();
+                ui.label("Switch to the game window now!");
+            }
+        }
+
+        // --- Painting Progress ---
+        if self.painting_active {
+            ui.separator();
+            ui.heading("Painting");
+
+            if let Some(ref progress) = self.paint_progress {
+                let pct = progress.percent as f32 / 100.0;
+                ui.add(egui::ProgressBar::new(pct).show_percentage());
+                ui.label(format!(
+                    "{} / {} commands",
+                    progress.commands_executed, progress.total_commands
+                ));
+
+                // ETA calculation
+                if progress.percent > 0.0 && progress.percent < 100.0 {
+                    let remaining_cmds = progress.total_commands - progress.commands_executed;
+                    let est_remaining = remaining_cmds as f64 * self.delay_ms as f64 / 1000.0;
+                    let mins = (est_remaining / 60.0).floor() as u64;
+                    let secs = (est_remaining % 60.0).round() as u64;
+                    if mins > 0 {
+                        ui.label(format!("ETA: ~{}m {}s remaining", mins, secs));
+                    } else {
+                        ui.label(format!("ETA: ~{}s remaining", secs));
+                    }
+                }
+
+                if let Some(ref color) = progress.current_color {
+                    ui.horizontal(|ui| {
+                        if let Ok((r, g, b)) = parse_hex_color(color) {
+                            let c = egui::Color32::from_rgb(r, g, b);
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(14.0, 14.0), egui::Sense::hover(),
+                            );
+                            ui.painter().rect_filled(rect, 2.0, c);
+                        }
+                        ui.label(format!("Current: #{}", color));
+                    });
+                }
+            } else {
+                ui.spinner();
+                ui.label("Starting...");
+            }
+
+            // Pause / Cancel buttons
+            ui.horizontal(|ui| {
+                if self.is_paused() {
+                    if ui.button("Resume (F10)").clicked() {
+                        self.toggle_pause();
+                    }
+                } else {
+                    if ui.button("Pause (F10)").clicked() {
+                        self.toggle_pause();
+                    }
+                }
+                if ui.button("Cancel (ESC)").clicked() {
+                    self.stop_painting();
+                }
+            });
+
+            if self.is_paused() {
+                ui.label("PAUSED");
+            }
+        }
+
         // Color palette display
         if let Some(ref groups) = self.paint_groups {
             ui.separator();
@@ -821,6 +1159,78 @@ impl RustBrushApp {
             }
             if groups.len() > max_show {
                 ui.label(format!("...and {} more", groups.len() - max_show));
+            }
+        }
+
+        // --- Session Recovery ---
+        if !self.painting_active {
+            let sessions_dir = Session::default_sessions_dir();
+            if sessions_dir.exists() {
+                if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+                    let mut session_files: Vec<PathBuf> = entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+                        .collect();
+                    session_files.sort_by(|a, b| b.cmp(a)); // newest first
+
+                    if !session_files.is_empty() {
+                        ui.separator();
+                        egui::CollapsingHeader::new(format!(
+                            "Saved Sessions ({})", session_files.len()
+                        ))
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            let mut to_delete = None;
+                            let mut to_resume = None;
+
+                            for (idx, path) in session_files.iter().take(10).enumerate() {
+                                let fname = path.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("?");
+
+                                ui.horizontal(|ui| {
+                                    ui.label(fname);
+                                    if ui.small_button("Resume").clicked() {
+                                        to_resume = Some(path.clone());
+                                    }
+                                    if ui.small_button("Delete").clicked() {
+                                        to_delete = Some(idx);
+                                    }
+                                });
+
+                                // Show session info on hover
+                                if let Ok(session) = Session::load(path) {
+                                    ui.small(format!(
+                                        "  {:.0}% ({}/{})",
+                                        session.progress_percent(),
+                                        session.progress,
+                                        session.plan.commands.len(),
+                                    ));
+                                }
+                            }
+
+                            if let Some(idx) = to_delete {
+                                let _ = std::fs::remove_file(&session_files[idx]);
+                            }
+
+                            if let Some(path) = to_resume {
+                                if let Ok(session) = Session::load(&path) {
+                                    self.resume_index = session.progress;
+                                    self.canvas_region = Some(session.canvas_region);
+                                    self.paint_plan = Some(session.plan.clone());
+                                    self.session_path = Some(path);
+                                    self.status_message = format!(
+                                        "Session loaded. Resuming from {:.0}%.",
+                                        session.progress_percent()
+                                    );
+                                    // Auto-start with countdown
+                                    self.start_painting_countdown();
+                                }
+                            }
+                        });
+                    }
+                }
             }
         }
     }
