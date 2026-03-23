@@ -1,0 +1,27 @@
+[package]
+name = "rustbrush"
+version = "0.1.0"
+edition = "2021"
+description = "An automatic sign painter for Rust (the game). Uses only safe OS-level input simulation."
+license = "MIT"
+
+[dependencies]
+# OS-level input simulation via SendInput (Windows) / xdotool (Linux)
+# This is the same approach used by Rustangelo and RustForge - no game memory access
+enigo = "0.2"
+
+# Screenshot capture - reads pixels from screen, never touches game memory
+screenshots = "0.8"
+
+# Image loading and processing
+image = "0.25"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Color distance calculations (CIEDE2000)
+palette = "0.7"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
