@@ -9,6 +9,10 @@ license = "MIT"
 name = "rustbrush"
 path = "src/main.rs"
 
+[[bin]]
+name = "rustbrush-gui"
+path = "src/gui.rs"
+
 [dependencies]
 rustbrush-core = { path = "../rustbrush-core" }
 rustbrush-platform = { path = "../rustbrush-platform" }
@@ -17,3 +21,6 @@ image = "0.25"
 device_query = "2"
 log = "0.4"
 env_logger = "0.11"
+eframe = "0.33"
+egui_extras = { version = "0.33", features = ["image"] }
+rfd = "0.17"

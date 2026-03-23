@@ -32,8 +32,8 @@
 - [ ] **Adaptive delays** - Auto-tune click delays based on server responsiveness
 
 ## Phase 5: GUI & Polish
-- [ ] **GUI mode** - egui/eframe window with image preview, settings, start/stop
+- [x] **GUI mode** - egui/eframe window with image preview, settings, plan generation
+- [x] **GitHub Actions CI** - Build + test on Linux, release Windows binary
 - [ ] **Image editor** - Built-in crop, rotate, brightness/contrast adjustments
 - [ ] **Config file** - Save/load user settings and calibration data
 - [ ] **Adaptive 512-color palette** - K-means clustering in Lab space for optimal hex colors
-- [ ] **GitHub Actions CI** - Build + test on Linux, release Windows binary
