@@ -1,0 +1,19 @@
+[package]
+name = "rustbrush"
+version = "0.1.0"
+edition = "2021"
+description = "An automatic sign painter for Rust (the game)"
+license = "MIT"
+
+[[bin]]
+name = "rustbrush"
+path = "src/main.rs"
+
+[dependencies]
+rustbrush-core = { path = "../rustbrush-core" }
+rustbrush-platform = { path = "../rustbrush-platform" }
+clap = { version = "4", features = ["derive"] }
+image = "0.25"
+device_query = "2"
+log = "0.4"
+env_logger = "0.11"

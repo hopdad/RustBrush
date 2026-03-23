@@ -4,18 +4,16 @@
 //! It does NOT read or write game memory, inject DLLs, or hook into any process.
 //! However, it has NOT been whitelisted by Facepunch/EAC. Use at your own risk.
 
-mod color;
-mod hotkeys;
-mod input;
-mod painter;
-mod region;
-mod screen;
-
 use clap::Parser;
-use color::{ColorMatchAlgo, DitherMode, QuantizeOptions};
-use device_query::Keycode;
+use rustbrush_core::color::{ColorMatchAlgo, DitherMode, QuantizeOptions};
+use rustbrush_core::painting;
+use rustbrush_platform::capture;
+use rustbrush_platform::hotkey::{PaintControl, region};
+use rustbrush_platform::input::{InputDriver, SafeInput};
 use std::path::PathBuf;
 use std::time::Duration;
+
+use device_query::Keycode;
 
 #[derive(Parser, Debug)]
 #[command(name = "rustbrush")]
@@ -94,13 +92,17 @@ struct Cli {
     /// Save a preview of the quantized image to this path before painting
     #[arg(long)]
     preview: Option<PathBuf>,
+
+    /// Canvas preset name (e.g. "wooden sign", "portrait frame")
+    #[arg(long)]
+    preset: Option<String>,
 }
 
 fn parse_color_algo(s: &str) -> Result<ColorMatchAlgo, String> {
     match s.to_lowercase().as_str() {
         "ciede2000" | "perceptual" => Ok(ColorMatchAlgo::Ciede2000),
         "rgb" | "euclidean" => Ok(ColorMatchAlgo::Rgb),
-        _ => Err(format!("Unknown color matching algorithm '{}'. Use 'ciede2000' or 'rgb'.", s)),
+        _ => Err(format!("Unknown algorithm '{}'. Use 'ciede2000' or 'rgb'.", s)),
     }
 }
 
@@ -109,10 +111,7 @@ fn parse_dither_mode(s: &str) -> Result<DitherMode, String> {
         "none" => Ok(DitherMode::None),
         "floydsteinberg" | "fs" => Ok(DitherMode::FloydSteinberg),
         "ordered" | "bayer" => Ok(DitherMode::Ordered),
-        _ => Err(format!(
-            "Unknown dithering mode '{}'. Use 'none', 'floyd-steinberg', or 'ordered'.",
-            s
-        )),
+        _ => Err(format!("Unknown dithering mode '{}'. Use 'none', 'floyd-steinberg', or 'ordered'.", s)),
     }
 }
 
@@ -129,7 +128,22 @@ fn parse_hex_color(s: &str) -> Result<(u8, u8, u8), String> {
 
 fn main() {
     env_logger::init();
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // Apply canvas preset if specified
+    if let Some(ref preset_name) = cli.preset {
+        if let Some(preset) = rustbrush_core::canvas::find_preset(preset_name) {
+            cli.canvas_width = preset.width;
+            cli.canvas_height = preset.height;
+            println!("Using preset: {}", preset);
+        } else {
+            eprintln!("Unknown preset '{}'. Available presets:", preset_name);
+            for p in rustbrush_core::canvas::all_presets() {
+                eprintln!("  {}", p);
+            }
+            std::process::exit(1);
+        }
+    }
 
     if !cli.accept_risk && !cli.dry_run {
         print_disclaimer();
@@ -140,23 +154,23 @@ fn main() {
     }
 
     // Load and process the image
-    let img = match image::open(&cli.image) {
-        Ok(img) => img.to_rgba8(),
+    let img = match rustbrush_core::image::load_image(&cli.image) {
+        Ok(img) => img,
         Err(e) => {
-            eprintln!("Failed to load image '{}': {}", cli.image.display(), e);
+            eprintln!("{}", e);
             std::process::exit(1);
         }
     };
 
     // Resize to canvas dimensions
-    let img = image::imageops::resize(
+    let img = rustbrush_core::image::resize(
         &img,
         cli.canvas_width,
         cli.canvas_height,
-        image::imageops::FilterType::Lanczos3,
+        rustbrush_core::image::AspectRatio::Stretch,
     );
 
-    // Build quantization options from CLI args
+    // Build quantization options
     let opts = QuantizeOptions {
         algorithm: cli.color_match,
         dither: cli.dither,
@@ -166,30 +180,27 @@ fn main() {
     };
 
     // Map every pixel to the nearest Rust in-game palette color
-    let palette = color::rust_palette();
-    let pixel_plan = color::map_image_to_palette(&img, &palette, &opts);
+    let palette = rustbrush_core::color::rust_palette();
+    let pixel_plan = rustbrush_core::color::map_image_to_palette(&img, &palette, &opts);
 
     // Save preview if requested
     if let Some(ref preview_path) = cli.preview {
-        let preview_img = color::build_preview(&img, &pixel_plan);
+        let preview_img = rustbrush_core::color::build_preview(&img, &pixel_plan);
         match preview_img.save(preview_path) {
             Ok(()) => println!("Preview saved to: {}", preview_path.display()),
             Err(e) => eprintln!("Failed to save preview: {}", e),
         }
     }
 
-    // Group pixels by color for efficient painting
-    let paint_groups = painter::group_by_color(&pixel_plan, cli.canvas_width, cli.canvas_height);
+    // Group pixels by color
+    let paint_groups = painting::group_by_color(&pixel_plan);
 
     let total_pixels: usize = paint_groups.iter().map(|g| g.pixels.len()).sum();
     let total_colors = paint_groups.len();
 
     println!(
         "Image: {}x{} -> {}x{} canvas",
-        img.width(),
-        img.height(),
-        cli.canvas_width,
-        cli.canvas_height
+        img.width(), img.height(), cli.canvas_width, cli.canvas_height
     );
     println!("Colors used: {}, Total pixels: {}", total_colors, total_pixels);
     println!(
@@ -206,13 +217,13 @@ fn main() {
             total_pixels, total_colors
         );
         println!(
-            "[DRY RUN] No input will be sent. Estimated time: {:.0}s",
+            "[DRY RUN] Estimated time: {:.0}s",
             total_pixels as f64 * cli.delay_ms as f64 / 1000.0
         );
         for group in &paint_groups {
             println!(
-                "  Color #{:02X}{:02X}{:02X}: {} pixels",
-                group.color.0, group.color.1, group.color.2, group.pixels.len()
+                "  Color #{}: {} pixels",
+                group.hex, group.pixels.len()
             );
         }
         return;
@@ -223,8 +234,7 @@ fn main() {
     println!("Switch to the Rust game window with the sign editor open.");
     println!("You'll mark regions by pressing a hotkey, then clicking and dragging.\n");
 
-    // Capture canvas region (F9)
-    let canvas = match region::capture_region_interactive("Canvas", Keycode::F9) {
+    let canvas_region = match region::capture_region_interactive("Canvas", Keycode::F9) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Canvas capture failed: {}", e);
@@ -232,7 +242,6 @@ fn main() {
         }
     };
 
-    // Capture hex input position if hex mode is enabled
     let hex_input_pos = if cli.hex_input {
         match region::capture_point_interactive("Hex color input field", Keycode::F7) {
             Ok(pos) => Some(pos),
@@ -245,7 +254,6 @@ fn main() {
         None
     };
 
-    // Capture palette region (F8) - still needed even in hex mode for fallback
     let palette_region = match region::capture_region_interactive("Palette", Keycode::F8) {
         Ok(r) => r,
         Err(e) => {
@@ -254,8 +262,12 @@ fn main() {
         }
     };
 
-    // Sample colors from the palette
-    let palette_colors = match region::sample_palette_colors(&palette_region) {
+    let palette_colors = match capture::sample_palette_colors(
+        palette_region.x,
+        palette_region.y,
+        palette_region.width,
+        palette_region.height,
+    ) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Palette sampling failed: {}", e);
@@ -263,12 +275,7 @@ fn main() {
         }
     };
 
-    let layout = region::CapturedLayout {
-        canvas,
-        palette: palette_region,
-        palette_colors,
-        hex_input_pos,
-    };
+    println!("Sampled {} unique colors from palette", palette_colors.len());
 
     // Countdown before painting
     println!("\nPainting starts in {} seconds...", cli.startup_delay);
@@ -279,34 +286,139 @@ fn main() {
     }
 
     // Set up hotkey controls and start painting
-    let control = hotkeys::PaintControl::new();
+    let control = PaintControl::new();
     control.start_listener();
 
     let delay = Duration::from_millis(cli.delay_ms);
-    match painter::paint(
-        &paint_groups,
-        &layout,
-        cli.canvas_width,
-        cli.canvas_height,
-        delay,
-        &control,
-    ) {
-        Ok(painter::PaintResult::Completed { painted }) => {
-            println!("\nPainting complete! {} pixels painted.", painted);
+    let mut input = match SafeInput::new(delay) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("Failed to initialize input: {}", e);
+            return;
         }
-        Ok(painter::PaintResult::Cancelled {
-            painted,
-            total_pixels,
-        }) => {
+    };
+
+    let use_hex = hex_input_pos.is_some();
+    let total_pixels_count = total_pixels;
+    let mut painted = 0usize;
+
+    println!(
+        "Starting painting: {} colors, {} pixels{}",
+        total_colors, total_pixels_count,
+        if use_hex { " (hex input mode)" } else { "" }
+    );
+    println!("Controls: F10 = pause/resume, ESC = cancel");
+
+    for (i, group) in paint_groups.iter().enumerate() {
+        if !control.check() {
             println!(
                 "\nPainting cancelled. {}/{} pixels painted ({:.1}%).",
-                painted,
-                total_pixels,
-                painted as f64 / total_pixels as f64 * 100.0
+                painted, total_pixels_count,
+                painted as f64 / total_pixels_count as f64 * 100.0
             );
+            return;
         }
-        Err(e) => eprintln!("\nPainting failed: {}", e),
+
+        println!(
+            "[{}/{}] Color #{} ({} pixels)",
+            i + 1, total_colors, group.hex, group.pixels.len()
+        );
+
+        // Select the color
+        if let Some(hex_pos) = hex_input_pos {
+            if let Err(e) = select_color_by_hex(&mut input, &group.hex, hex_pos) {
+                eprintln!("Color selection failed: {}", e);
+                return;
+            }
+        } else {
+            let entry = find_nearest_palette_entry(
+                group.color.0, group.color.1, group.color.2,
+                &palette_colors,
+            );
+            if let Err(e) = input.move_to(entry.screen_x, entry.screen_y) {
+                eprintln!("Move failed: {}", e);
+                return;
+            }
+            if let Err(e) = input.click() {
+                eprintln!("Click failed: {}", e);
+                return;
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(30));
+
+        // Paint each pixel in this group
+        for &(px, py) in &group.pixels {
+            if !control.check() {
+                println!(
+                    "\nPainting cancelled. {}/{} pixels painted ({:.1}%).",
+                    painted, total_pixels_count,
+                    painted as f64 / total_pixels_count as f64 * 100.0
+                );
+                return;
+            }
+
+            let (screen_x, screen_y) = painting::pixel_to_screen(
+                px, py,
+                cli.canvas_width, cli.canvas_height,
+                &painting::ScreenRect {
+                    x: canvas_region.x,
+                    y: canvas_region.y,
+                    width: canvas_region.width,
+                    height: canvas_region.height,
+                },
+            );
+
+            if let Err(e) = input.move_to(screen_x, screen_y) {
+                eprintln!("Move failed: {}", e);
+                return;
+            }
+            if let Err(e) = input.click() {
+                eprintln!("Click failed: {}", e);
+                return;
+            }
+
+            painted += 1;
+            if painted % 500 == 0 {
+                let pct = (painted as f64 / total_pixels_count as f64) * 100.0;
+                println!("  Progress: {}/{} ({:.1}%)", painted, total_pixels_count, pct);
+            }
+        }
     }
+
+    println!("\nPainting complete! {} pixels painted.", painted);
+}
+
+fn select_color_by_hex(
+    input: &mut impl InputDriver,
+    hex: &str,
+    hex_input_pos: (i32, i32),
+) -> Result<(), String> {
+    input.move_to(hex_input_pos.0, hex_input_pos.1)?;
+    input.click()?;
+    std::thread::sleep(Duration::from_millis(30));
+    input.select_all()?;
+    std::thread::sleep(Duration::from_millis(20));
+    input.type_text(hex)?;
+    std::thread::sleep(Duration::from_millis(20));
+    input.press_key_return()?;
+    std::thread::sleep(Duration::from_millis(30));
+    Ok(())
+}
+
+fn find_nearest_palette_entry(
+    r: u8, g: u8, b: u8,
+    palette: &[capture::PaletteEntry],
+) -> &capture::PaletteEntry {
+    palette
+        .iter()
+        .min_by_key(|e| {
+            let dr = r as i32 - e.r as i32;
+            let dg = g as i32 - e.g as i32;
+            let db = b as i32 - e.b as i32;
+            (dr * dr + dg * dg + db * db) as u32
+        })
+        .unwrap()
 }
 
 fn print_disclaimer() {

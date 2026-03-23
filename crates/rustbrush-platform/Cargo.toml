@@ -1,0 +1,14 @@
+[package]
+name = "rustbrush-platform"
+version = "0.1.0"
+edition = "2021"
+description = "Platform layer for RustBrush: input simulation, screen capture, hotkeys"
+license = "MIT"
+
+[dependencies]
+rustbrush-core = { path = "../rustbrush-core" }
+enigo = "0.2"
+screenshots = "0.8"
+device_query = "2"
+portable-atomic = "1"
+log = "0.4"

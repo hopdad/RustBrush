@@ -24,13 +24,17 @@ RustBrush is designed with anti-cheat safety as a primary concern:
 
 ## Features
 
-- **Interactive region capture** - Mark your canvas and palette areas on screen (like RustForge's F9/F10)
-- **Auto palette sampling** - Reads actual colors from your screen instead of hardcoding
-- **Color-grouped painting** - Groups pixels by color to minimize palette switches
+- **Perceptual color matching (CIEDE2000)** - Accurate color reproduction using human-perceptual distance
+- **Dithering** - Floyd-Steinberg error-diffusion and ordered (Bayer) dithering for quality with limited palettes
+- **Interactive region capture** - Mark your canvas and palette areas on screen (F9/F8 hotkeys)
+- **Hex code input mode** - Type hex colors directly for exact reproduction (--hex-input)
+- **Auto palette sampling** - Reads actual colors from your screen
+- **Color-grouped painting** - Groups pixels by color with nearest-neighbor ordering to minimize palette switches and mouse travel
+- **Canvas presets** - Built-in dimensions for all sign types (wooden signs, frames, banners, neon signs, etc.)
 - **Pause/Resume/Cancel** - F10 to pause/resume, ESC to cancel mid-paint
 - **Dry-run mode** - Preview what would be painted without sending any input
+- **Image adjustments** - Brightness, contrast, and saturation controls
 - **Configurable speed** - Adjust delay between mouse actions
-- **Progress reporting** - Real-time progress updates during painting
 
 ## Usage
 
@@ -41,13 +45,22 @@ rustbrush myimage.png --dry-run
 # Paint with default settings
 rustbrush myimage.png --accept-risk
 # 1. Switch to Rust with sign editor open
-# 2. Press F9 at top-left of canvas, then F9 at bottom-right
-# 3. Press F8 at top-left of palette, then F8 at bottom-right
+# 2. Press F9, then click and drag to select the CANVAS area
+# 3. Press F8, then click and drag to select the COLOR PALETTE area
 # 4. Painting begins after countdown
 # 5. F10 = pause/resume, ESC = cancel
 
-# Custom canvas size and speed
-rustbrush myimage.png -W 128 -H 128 --delay-ms 20 --accept-risk
+# Use a canvas preset
+rustbrush myimage.png --preset "wooden sign" --accept-risk
+
+# Custom canvas size with dithering and hex input
+rustbrush myimage.png -W 128 -H 128 --dither floyd-steinberg --hex-input --accept-risk
+
+# Fast RGB color matching (less accurate but faster)
+rustbrush myimage.png --color-match rgb --accept-risk
+
+# Save a preview image before painting
+rustbrush myimage.png --preview preview.png --dry-run
 ```
 
 ## Building
@@ -64,38 +77,39 @@ cargo build --release
 # The binary will be at target/release/rustbrush
 ```
 
-## How It Works
-
-1. **Load** - Reads the input image and resizes it to the target dimensions
-2. **Map** - Converts each pixel to the nearest color in Rust's in-game palette
-3. **Group** - Groups pixels by color to minimize palette switches
-4. **Capture** - User marks the canvas and palette regions on screen with hotkeys
-5. **Sample** - Reads actual palette colors from the screen
-6. **Paint** - For each color group:
-   - Clicks the matching color in the on-screen palette
-   - Clicks each pixel position on the canvas
-   - Checks for pause/cancel between actions
-
 ## Architecture
 
+RustBrush is organized as a three-crate Cargo workspace:
+
 ```
-main.rs      - CLI, image loading, orchestration
-color.rs     - Palette definition, color matching (RGB Euclidean distance)
-input.rs     - OS-level input simulation via enigo (SendInput/xdotool)
-screen.rs    - Screen capture via OS APIs (never touches game memory)
-region.rs    - Interactive canvas/palette region capture
-hotkeys.rs   - Background hotkey listener (F10 pause, ESC cancel)
-painter.rs   - Painting engine with color grouping and progress tracking
+crates/
+├── rustbrush-core/        # Pure library: color science, image processing, paint planning
+│   └── src/
+│       ├── color/         # CIEDE2000, palette definitions, color matching, dithering
+│       ├── image/         # Loading, resize, brightness/contrast/saturation
+│       ├── painting/      # PaintPlan, PaintCommand, strategies (scanline, color-grouped)
+│       ├── canvas/        # Sign dimension presets for all sign types
+│       └── session/       # Save/resume state
+├── rustbrush-platform/    # OS-specific: input simulation, screen capture, hotkeys
+│   └── src/
+│       ├── input/         # InputDriver trait + enigo implementation + dry-run driver
+│       ├── capture/       # Screen capture and palette sampling
+│       └── hotkey/        # Global hotkey listener + interactive region capture
+└── rustbrush-app/         # CLI application
+    └── src/
+        └── main.rs        # CLI argument parsing and orchestration
 ```
 
-## Development Phases
+**Why three crates:** Core logic is testable on any OS (CI on Linux). Platform layer is swappable. CLI is decoupled from algorithms.
 
-See [PLAN.md](PLAN.md) for the full roadmap. Current status:
+## How It Works
 
-- [x] **Phase 1: Core Foundation** - End-to-end painting with interactive region capture
-- [ ] **Phase 2: Image Quality** - CIEDE2000 color matching, dithering, previews
-- [ ] **Phase 3: Performance** - Line drawing optimization, adaptive delays, save/resume
-- [ ] **Phase 4: Polish** - GUI mode, multiple sign sizes, built-in editor
+1. **Load** - Reads the input image and resizes it to the target canvas dimensions (Lanczos3)
+2. **Map** - Converts each pixel to the nearest color in Rust's 32-color palette (CIEDE2000 or RGB distance)
+3. **Dither** (optional) - Applies Floyd-Steinberg or ordered dithering for better visual quality
+4. **Group** - Groups pixels by color, sorts by frequency, orders within groups by nearest-neighbor
+5. **Capture** - User marks the canvas and palette regions on screen with hotkeys
+6. **Paint** - For each color group: selects color (palette click or hex input) → paints all pixels → checks for pause/cancel
 
 ## License
 
