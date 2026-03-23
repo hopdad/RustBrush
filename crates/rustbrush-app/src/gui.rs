@@ -11,7 +11,7 @@ use rustbrush_core::image as rb_image;
 use rustbrush_core::painting::{self, ColorGroup, PaintPlan, PaintStrategy, ScreenRect};
 use rustbrush_core::session::Session;
 use rustbrush_platform::executor::{self, ExecutionResult, ExecutorConfig, ProgressUpdate};
-use rustbrush_platform::hotkey::PaintControl;
+use rustbrush_platform::hotkey::{PaintControl, region};
 use rustbrush_platform::input::{InputDriver, SafeInput};
 use portable_atomic::Ordering;
 use std::path::PathBuf;
@@ -102,6 +102,11 @@ struct RustBrushApp {
     canvas_region: Option<ScreenRect>,
     hex_field_pos: Option<(i32, i32)>,
     resume_index: usize,
+
+    // Calibration state
+    calibration_rx: Option<mpsc::Receiver<CalibrationResult>>,
+    calibrating: bool,
+    calibration_label: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +197,12 @@ impl QualityPreset {
     }
 }
 
+/// Result from a background calibration capture.
+enum CalibrationResult {
+    CanvasRegion(Result<region::ScreenRegion, String>),
+    HexFieldPoint(Result<(i32, i32), String>),
+}
+
 /// Result sent back from the background processing thread.
 struct ProcessResult {
     preview_image: image::RgbaImage,
@@ -269,6 +280,10 @@ impl RustBrushApp {
             canvas_region: None,
             hex_field_pos: None,
             resume_index: 0,
+
+            calibration_rx: None,
+            calibrating: false,
+            calibration_label: String::new(),
         }
     }
 
@@ -649,6 +664,42 @@ impl RustBrushApp {
             .map(|c| c.paused.load(Ordering::Relaxed))
             .unwrap_or(false)
     }
+
+    /// Start interactive canvas region capture on a background thread.
+    fn start_canvas_capture(&mut self) {
+        if self.calibrating {
+            return;
+        }
+        self.calibrating = true;
+        self.calibration_label = "Canvas".to_string();
+        self.status_message = "Press F9, then click and drag to select the canvas area. ESC to cancel.".to_string();
+
+        let (tx, rx) = mpsc::channel();
+        self.calibration_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let result = region::capture_region_interactive("Canvas", device_query::Keycode::F9);
+            let _ = tx.send(CalibrationResult::CanvasRegion(result));
+        });
+    }
+
+    /// Start interactive hex field point capture on a background thread.
+    fn start_hex_field_capture(&mut self) {
+        if self.calibrating {
+            return;
+        }
+        self.calibrating = true;
+        self.calibration_label = "Hex Field".to_string();
+        self.status_message = "Press F8, then click on the hex input field. ESC to cancel.".to_string();
+
+        let (tx, rx) = mpsc::channel();
+        self.calibration_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let result = region::capture_point_interactive("Hex Input Field", device_query::Keycode::F8);
+            let _ = tx.send(CalibrationResult::HexFieldPoint(result));
+        });
+    }
 }
 
 impl eframe::App for RustBrushApp {
@@ -684,6 +735,42 @@ impl eframe::App for RustBrushApp {
                     self.pending_reprocess = true;
                 }
             }
+        }
+
+        // Poll calibration results
+        if let Some(ref rx) = self.calibration_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.calibrating = false;
+                self.calibration_rx = None;
+                match result {
+                    CalibrationResult::CanvasRegion(Ok(r)) => {
+                        self.canvas_region = Some(ScreenRect {
+                            x: r.x, y: r.y, width: r.width, height: r.height,
+                        });
+                        self.status_message = format!(
+                            "Canvas region set: {}x{} at ({}, {})",
+                            r.width, r.height, r.x, r.y
+                        );
+                    }
+                    CalibrationResult::CanvasRegion(Err(e)) => {
+                        self.status_message = format!("Canvas capture cancelled: {}", e);
+                    }
+                    CalibrationResult::HexFieldPoint(Ok((x, y))) => {
+                        self.hex_field_pos = Some((x, y));
+                        self.status_message = format!(
+                            "Hex field position set: ({}, {})", x, y
+                        );
+                    }
+                    CalibrationResult::HexFieldPoint(Err(e)) => {
+                        self.status_message = format!("Hex field capture cancelled: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Keep polling while calibrating
+        if self.calibrating {
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
 
         // Debounced auto-reprocess
@@ -1014,54 +1101,103 @@ impl RustBrushApp {
             ));
         }
 
-        // --- Canvas Region Setup ---
+        // --- Calibration & Paint Setup ---
         if has_plan && !self.painting_active {
             ui.separator();
-            ui.heading("Paint Setup");
+            ui.heading("Calibration");
 
-            // Manual canvas region input
-            ui.label("Canvas region (screen coords):");
-            let mut region = self.canvas_region.unwrap_or(ScreenRect {
-                x: 0, y: 0, width: 800, height: 600,
-            });
-            let mut region_changed = false;
-            ui.horizontal(|ui| {
-                ui.label("X:");
-                region_changed |= ui.add(egui::DragValue::new(&mut region.x)).changed();
-                ui.label("Y:");
-                region_changed |= ui.add(egui::DragValue::new(&mut region.y)).changed();
-            });
-            ui.horizontal(|ui| {
-                ui.label("W:");
-                region_changed |= ui.add(
-                    egui::DragValue::new(&mut region.width).range(10..=4096u32)
-                ).changed();
-                ui.label("H:");
-                region_changed |= ui.add(
-                    egui::DragValue::new(&mut region.height).range(10..=4096u32)
-                ).changed();
-            });
-            if region_changed || self.canvas_region.is_none() {
-                self.canvas_region = Some(region);
-            }
-
-            if self.hex_input || self.adaptive_palette {
-                ui.label("Hex input field position:");
-                let mut pos = self.hex_field_pos.unwrap_or((0, 0));
+            if self.calibrating {
+                ui.spinner();
+                ui.label(format!("Capturing {}...", self.calibration_label));
+                ui.small("Press the indicated key, then click/drag. ESC to cancel.");
+            } else {
+                // Canvas region capture
                 ui.horizontal(|ui| {
-                    ui.label("X:");
-                    ui.add(egui::DragValue::new(&mut pos.0));
-                    ui.label("Y:");
-                    ui.add(egui::DragValue::new(&mut pos.1));
+                    if ui.button("Select Canvas Region (F9)")
+                        .on_hover_text("Press F9, then click and drag over the in-game canvas area")
+                        .clicked()
+                    {
+                        self.start_canvas_capture();
+                    }
+                    if self.canvas_region.is_some() {
+                        ui.label("Set");
+                    }
                 });
-                self.hex_field_pos = Some(pos);
+
+                if let Some(ref region) = self.canvas_region {
+                    ui.small(format!(
+                        "  {}x{} at ({}, {})", region.width, region.height, region.x, region.y
+                    ));
+                }
+
+                // Hex field point capture
+                if self.hex_input || self.adaptive_palette {
+                    ui.horizontal(|ui| {
+                        if ui.button("Select Hex Field (F8)")
+                            .on_hover_text("Press F8, then click on the hex color input field in-game")
+                            .clicked()
+                        {
+                            self.start_hex_field_capture();
+                        }
+                        if self.hex_field_pos.is_some() {
+                            ui.label("Set");
+                        }
+                    });
+
+                    if let Some((x, y)) = self.hex_field_pos {
+                        ui.small(format!("  Position: ({}, {})", x, y));
+                    }
+                }
+
+                // Manual override (collapsible)
+                egui::CollapsingHeader::new("Manual Coordinates")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label("Canvas region:");
+                        let mut region = self.canvas_region.unwrap_or(ScreenRect {
+                            x: 0, y: 0, width: 800, height: 600,
+                        });
+                        let mut region_changed = false;
+                        ui.horizontal(|ui| {
+                            ui.label("X:");
+                            region_changed |= ui.add(egui::DragValue::new(&mut region.x)).changed();
+                            ui.label("Y:");
+                            region_changed |= ui.add(egui::DragValue::new(&mut region.y)).changed();
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("W:");
+                            region_changed |= ui.add(
+                                egui::DragValue::new(&mut region.width).range(10..=4096u32)
+                            ).changed();
+                            ui.label("H:");
+                            region_changed |= ui.add(
+                                egui::DragValue::new(&mut region.height).range(10..=4096u32)
+                            ).changed();
+                        });
+                        if region_changed || self.canvas_region.is_none() {
+                            self.canvas_region = Some(region);
+                        }
+
+                        if self.hex_input || self.adaptive_palette {
+                            ui.label("Hex field position:");
+                            let mut pos = self.hex_field_pos.unwrap_or((0, 0));
+                            ui.horizontal(|ui| {
+                                ui.label("X:");
+                                ui.add(egui::DragValue::new(&mut pos.0));
+                                ui.label("Y:");
+                                ui.add(egui::DragValue::new(&mut pos.1));
+                            });
+                            self.hex_field_pos = Some(pos);
+                        }
+                    });
             }
 
             ui.separator();
 
             // Start painting button
             let can_start = self.canvas_region.is_some()
-                && self.countdown_start.is_none();
+                && self.countdown_start.is_none()
+                && !self.calibrating;
             ui.add_enabled_ui(can_start, |ui| {
                 if ui
                     .button("Start Painting (3s countdown)")
