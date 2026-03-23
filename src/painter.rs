@@ -3,10 +3,13 @@
 //! SAFETY APPROACH:
 //! - Groups pixels by color to minimize color-picker interactions
 //! - Uses only OS-level input simulation (see input.rs)
-//! - Provides interruptible painting with progress reporting
+//! - Interruptible via hotkeys (F10 pause, ESC cancel)
+//! - All coordinates come from user-captured screen regions
 
 use crate::color::MappedPixel;
+use crate::hotkeys::PaintControl;
 use crate::input::SafeInput;
+use crate::region::{CapturedLayout, PaletteEntry, ScreenRegion};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -42,22 +45,58 @@ pub fn group_by_color(pixels: &[MappedPixel], _width: u32, _height: u32) -> Vec<
     result
 }
 
-/// Paint all color groups onto the canvas.
+/// Convert an image pixel coordinate to a screen coordinate within the canvas.
+fn pixel_to_screen(
+    px: u32,
+    py: u32,
+    img_width: u32,
+    img_height: u32,
+    canvas: &ScreenRegion,
+) -> (i32, i32) {
+    let sx = canvas.x + (px as f64 / img_width as f64 * canvas.width as f64) as i32;
+    let sy = canvas.y + (py as f64 / img_height as f64 * canvas.height as f64) as i32;
+    (sx, sy)
+}
+
+/// Find the palette entry closest to the target color.
+fn find_nearest_palette_entry(r: u8, g: u8, b: u8, palette: &[PaletteEntry]) -> &PaletteEntry {
+    palette
+        .iter()
+        .min_by_key(|e| {
+            let dr = r as i32 - e.r as i32;
+            let dg = g as i32 - e.g as i32;
+            let db = b as i32 - e.b as i32;
+            (dr * dr + dg * dg + db * db) as u32
+        })
+        .unwrap()
+}
+
+/// Paint all color groups onto the canvas using captured screen regions.
 ///
-/// This assumes the Rust sign editor is open and focused, with the brush
-/// tool selected. The painting coordinate system is relative to the
-/// canvas top-left corner.
-///
-/// TODO: Canvas position detection needs to be calibrated per-resolution.
-/// For now, users need to configure canvas_origin manually.
-pub fn paint(groups: &[ColorGroup], delay: Duration) -> Result<(), String> {
+/// This is the main painting function. It:
+/// 1. Selects each color by clicking its position in the palette
+/// 2. Paints all pixels of that color on the canvas
+/// 3. Checks hotkeys between actions for pause/cancel
+pub fn paint(
+    groups: &[ColorGroup],
+    layout: &CapturedLayout,
+    img_width: u32,
+    img_height: u32,
+    delay: Duration,
+    control: &PaintControl,
+) -> Result<PaintResult, String> {
     let mut input = SafeInput::new(delay)?;
     let total_pixels: usize = groups.iter().map(|g| g.pixels.len()).sum();
     let mut painted = 0usize;
 
     println!("Starting painting: {} colors, {} pixels", groups.len(), total_pixels);
+    println!("Controls: F10 = pause/resume, ESC = cancel");
 
     for (i, group) in groups.iter().enumerate() {
+        if !control.check() {
+            return Ok(PaintResult::Cancelled { painted, total_pixels });
+        }
+
         println!(
             "[{}/{}] Color #{} ({} pixels)",
             i + 1,
@@ -66,16 +105,22 @@ pub fn paint(groups: &[ColorGroup], delay: Duration) -> Result<(), String> {
             group.pixels.len()
         );
 
-        // Select this color via the hex input in Rust's color picker.
-        // The new color picker (Nov 2025) supports hex code entry.
-        select_color_by_hex(&mut input, &group.hex)?;
+        // Find the closest color in the sampled palette and click it
+        let entry = find_nearest_palette_entry(group.color.0, group.color.1, group.color.2, &layout.palette_colors);
+        input.move_to(entry.screen_x, entry.screen_y)?;
+        input.click()?;
+
+        // Small delay for color picker UI to update
+        std::thread::sleep(Duration::from_millis(30));
 
         // Paint each pixel in this color group
         for &(px, py) in &group.pixels {
-            // Convert canvas pixel coordinates to screen coordinates.
-            // TODO: Make canvas origin configurable via CLI or auto-detect.
-            let screen_x = canvas_pixel_to_screen_x(px);
-            let screen_y = canvas_pixel_to_screen_y(py);
+            if !control.check() {
+                return Ok(PaintResult::Cancelled { painted, total_pixels });
+            }
+
+            let (screen_x, screen_y) =
+                pixel_to_screen(px, py, img_width, img_height, &layout.canvas);
 
             input.move_to(screen_x, screen_y)?;
             input.click()?;
@@ -88,38 +133,11 @@ pub fn paint(groups: &[ColorGroup], delay: Duration) -> Result<(), String> {
         }
     }
 
-    Ok(())
+    Ok(PaintResult::Completed { painted })
 }
 
-/// Select a color by typing its hex code into Rust's color picker.
-fn select_color_by_hex(input: &mut SafeInput, hex: &str) -> Result<(), String> {
-    // TODO: These coordinates need to be calibrated for the actual UI layout.
-    // The hex input field position depends on screen resolution and UI scale.
-    // For now, this is a placeholder that will need per-setup calibration.
-
-    // Click the hex input field in the color picker
-    // (placeholder coordinates - must be calibrated)
-    input.move_to(960, 800)?;
-    input.click()?;
-
-    // Select all existing text and replace with new hex code
-    input.press_key(enigo::Key::Control)?;
-    input.type_text(hex)?;
-    input.press_key(enigo::Key::Return)?;
-
-    // Small extra delay after color selection for the UI to update
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    Ok(())
-}
-
-// Placeholder coordinate conversion - these need calibration
-// TODO: Auto-detect canvas position or make configurable
-fn canvas_pixel_to_screen_x(px: u32) -> i32 {
-    // Assumes canvas starts at screen position (400, 200) - placeholder
-    400 + px as i32
-}
-
-fn canvas_pixel_to_screen_y(py: u32) -> i32 {
-    200 + py as i32
+/// Result of a painting session.
+pub enum PaintResult {
+    Completed { painted: usize },
+    Cancelled { painted: usize, total_pixels: usize },
 }

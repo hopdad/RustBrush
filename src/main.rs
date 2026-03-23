@@ -5,11 +5,14 @@
 //! However, it has NOT been whitelisted by Facepunch/EAC. Use at your own risk.
 
 mod color;
+mod hotkeys;
 mod input;
 mod painter;
+mod region;
 mod screen;
 
 use clap::Parser;
+use device_query::Keycode;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -24,16 +27,24 @@ SAFETY DISCLAIMER:
   However, this tool has NOT been officially whitelisted by Facepunch or EAC.
   Use at your own risk. We recommend testing on a private server first
   (launch with +server.secure 0 to disable EAC).
+
+WORKFLOW:
+  1. Open the sign editor in Rust and select the brush tool
+  2. Run rustbrush with your image
+  3. Press F9 at the top-left then bottom-right of the CANVAS
+  4. Press F10 at the top-left then bottom-right of the COLOR PALETTE
+  5. Painting begins after a countdown
+  6. During painting: F10 = pause/resume, ESC = cancel
 ")]
 struct Cli {
     /// Path to the image file to paint
     image: PathBuf,
 
-    /// Canvas width in pixels (default: sign size)
+    /// Canvas width in pixels for image scaling
     #[arg(short = 'W', long, default_value_t = 256)]
     canvas_width: u32,
 
-    /// Canvas height in pixels (default: sign size)
+    /// Canvas height in pixels for image scaling
     #[arg(short = 'H', long, default_value_t = 256)]
     canvas_height: u32,
 
@@ -41,12 +52,12 @@ struct Cli {
     #[arg(short, long, default_value_t = 15)]
     delay_ms: u64,
 
-    /// Dry-run mode: simulate painting without sending any input
+    /// Dry-run mode: process image without capturing regions or painting
     #[arg(long)]
     dry_run: bool,
 
-    /// Seconds to wait before painting starts (to switch to game window)
-    #[arg(short, long, default_value_t = 5)]
+    /// Seconds to wait before painting starts (after region capture)
+    #[arg(short, long, default_value_t = 3)]
     startup_delay: u32,
 
     /// Skip the safety disclaimer confirmation
@@ -87,33 +98,112 @@ fn main() {
     let palette = color::rust_palette();
     let pixel_plan = color::map_image_to_palette(&img, &palette);
 
-    // Group pixels by color for efficient painting (one color-select per color)
+    // Group pixels by color for efficient painting
     let paint_groups = painter::group_by_color(&pixel_plan, cli.canvas_width, cli.canvas_height);
 
     let total_pixels: usize = paint_groups.iter().map(|g| g.pixels.len()).sum();
     let total_colors = paint_groups.len();
 
-    println!("Image: {}x{} -> {}x{} canvas", img.width(), img.height(), cli.canvas_width, cli.canvas_height);
+    println!(
+        "Image: {}x{} -> {}x{} canvas",
+        img.width(),
+        img.height(),
+        cli.canvas_width,
+        cli.canvas_height
+    );
     println!("Colors used: {}, Total pixels: {}", total_colors, total_pixels);
 
     if cli.dry_run {
-        println!("\n[DRY RUN] Would paint {} pixels across {} colors.", total_pixels, total_colors);
-        println!("[DRY RUN] No input will be sent. Estimated time: {:.0}s",
-            total_pixels as f64 * cli.delay_ms as f64 / 1000.0);
+        println!(
+            "\n[DRY RUN] Would paint {} pixels across {} colors.",
+            total_pixels, total_colors
+        );
+        println!(
+            "[DRY RUN] No input will be sent. Estimated time: {:.0}s",
+            total_pixels as f64 * cli.delay_ms as f64 / 1000.0
+        );
         for group in &paint_groups {
-            println!("  Color #{:02X}{:02X}{:02X}: {} pixels",
-                group.color.0, group.color.1, group.color.2, group.pixels.len());
+            println!(
+                "  Color #{:02X}{:02X}{:02X}: {} pixels",
+                group.color.0, group.color.1, group.color.2, group.pixels.len()
+            );
         }
         return;
     }
 
-    println!("\nSwitching to game window in {} seconds...", cli.startup_delay);
-    println!("Make sure the sign editor is open and the brush tool is selected!");
-    std::thread::sleep(Duration::from_secs(cli.startup_delay as u64));
+    // --- Interactive region capture ---
+    println!("\n=== Region Capture ===");
+    println!("Switch to the Rust game window with the sign editor open.");
+    println!("You'll mark the canvas and palette regions using hotkeys.\n");
+
+    // Capture canvas region (F9)
+    let canvas = match region::capture_region_interactive("Canvas", Keycode::F9) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Canvas capture failed: {}", e);
+            return;
+        }
+    };
+
+    // Capture palette region (F10)
+    let palette_region = match region::capture_region_interactive("Palette", Keycode::F8) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Palette capture failed: {}", e);
+            return;
+        }
+    };
+
+    // Sample colors from the palette
+    let palette_colors = match region::sample_palette_colors(&palette_region) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Palette sampling failed: {}", e);
+            return;
+        }
+    };
+
+    let layout = region::CapturedLayout {
+        canvas,
+        palette: palette_region,
+        palette_colors,
+    };
+
+    // Countdown before painting
+    println!("\nPainting starts in {} seconds...", cli.startup_delay);
+    println!("Make sure the brush tool is selected!");
+    for i in (1..=cli.startup_delay).rev() {
+        println!("  {}...", i);
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    // Set up hotkey controls and start painting
+    let control = hotkeys::PaintControl::new();
+    control.start_listener();
 
     let delay = Duration::from_millis(cli.delay_ms);
-    match painter::paint(&paint_groups, delay) {
-        Ok(()) => println!("\nPainting complete!"),
+    match painter::paint(
+        &paint_groups,
+        &layout,
+        cli.canvas_width,
+        cli.canvas_height,
+        delay,
+        &control,
+    ) {
+        Ok(painter::PaintResult::Completed { painted }) => {
+            println!("\nPainting complete! {} pixels painted.", painted);
+        }
+        Ok(painter::PaintResult::Cancelled {
+            painted,
+            total_pixels,
+        }) => {
+            println!(
+                "\nPainting cancelled. {}/{} pixels painted ({:.1}%).",
+                painted,
+                total_pixels,
+                painted as f64 / total_pixels as f64 * 100.0
+            );
+        }
         Err(e) => eprintln!("\nPainting failed: {}", e),
     }
 }

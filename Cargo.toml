@@ -22,6 +22,12 @@ clap = { version = "4", features = ["derive"] }
 # Color distance calculations (CIEDE2000)
 palette = "0.7"
 
+# Global hotkeys for pause/resume/cancel (OS-level, no game hooking)
+device_query = "2"
+
+# Atomic flags for cross-thread pause/cancel signaling
+portable-atomic = "1"
+
 # Logging
 log = "0.4"
 env_logger = "0.11"
