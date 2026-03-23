@@ -6,10 +6,12 @@
 
 use clap::Parser;
 use rustbrush_core::color::{ColorMatchAlgo, DitherMode, QuantizeOptions};
-use rustbrush_core::painting;
+use rustbrush_core::painting::{self, PaintStrategy, ScreenRect};
+use rustbrush_core::session::Session;
 use rustbrush_platform::capture;
+use rustbrush_platform::executor::{self, ExecutionResult, ExecutorConfig};
 use rustbrush_platform::hotkey::{PaintControl, region};
-use rustbrush_platform::input::{InputDriver, SafeInput};
+use rustbrush_platform::input::SafeInput;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -35,11 +37,16 @@ WORKFLOW:
   5. Painting begins after a countdown
   6. During painting: F10 = pause/resume, ESC = cancel
 
+STRATEGIES:
+  --strategy scanline        Row-by-row painting (simplest)
+  --strategy color-grouped   Group by color, nearest-neighbor ordering (fewer switches)
+  --strategy line-draw       Detect horizontal runs, use shift-click lines
+  --strategy hybrid          Color grouping + line detection (default, fastest)
+
 HEX INPUT MODE (--hex-input):
   For exact color reproduction, use --hex-input to type hex codes
   directly into the game's color input field instead of clicking
-  the palette. After marking canvas (F9), you'll also press F7
-  and click on the hex input field.
+  the palette.
 ")]
 struct Cli {
     /// Path to the image file to paint
@@ -96,6 +103,36 @@ struct Cli {
     /// Canvas preset name (e.g. "wooden sign", "portrait frame")
     #[arg(long)]
     preset: Option<String>,
+
+    /// Painting strategy: "hybrid" (default), "color-grouped", "line-draw", or "scanline"
+    #[arg(long, default_value = "hybrid", value_parser = parse_strategy)]
+    strategy: StrategyChoice,
+
+    /// Resume a previously interrupted session from a JSON file
+    #[arg(long)]
+    resume: Option<PathBuf>,
+
+    /// Save session progress for crash recovery (auto-save path)
+    #[arg(long)]
+    save_session: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StrategyChoice {
+    Scanline,
+    ColorGrouped,
+    LineDraw,
+    Hybrid,
+}
+
+fn parse_strategy(s: &str) -> Result<StrategyChoice, String> {
+    match s.to_lowercase().replace('-', "").as_str() {
+        "scanline" => Ok(StrategyChoice::Scanline),
+        "colorgrouped" | "grouped" => Ok(StrategyChoice::ColorGrouped),
+        "linedraw" | "line" => Ok(StrategyChoice::LineDraw),
+        "hybrid" => Ok(StrategyChoice::Hybrid),
+        _ => Err(format!("Unknown strategy '{}'. Use 'hybrid', 'color-grouped', 'line-draw', or 'scanline'.", s)),
+    }
 }
 
 fn parse_color_algo(s: &str) -> Result<ColorMatchAlgo, String> {
@@ -130,6 +167,12 @@ fn main() {
     env_logger::init();
     let mut cli = Cli::parse();
 
+    // Handle session resume
+    if let Some(ref resume_path) = cli.resume {
+        resume_session(resume_path, &cli);
+        return;
+    }
+
     // Apply canvas preset if specified
     if let Some(ref preset_name) = cli.preset {
         if let Some(preset) = rustbrush_core::canvas::find_preset(preset_name) {
@@ -162,7 +205,6 @@ fn main() {
         }
     };
 
-    // Resize to canvas dimensions
     let img = rustbrush_core::image::resize(
         &img,
         cli.canvas_width,
@@ -170,7 +212,6 @@ fn main() {
         rustbrush_core::image::AspectRatio::Stretch,
     );
 
-    // Build quantization options
     let opts = QuantizeOptions {
         algorithm: cli.color_match,
         dither: cli.dither,
@@ -179,11 +220,9 @@ fn main() {
         ..Default::default()
     };
 
-    // Map every pixel to the nearest Rust in-game palette color
     let palette = rustbrush_core::color::rust_palette();
     let pixel_plan = rustbrush_core::color::map_image_to_palette(&img, &palette, &opts);
 
-    // Save preview if requested
     if let Some(ref preview_path) = cli.preview {
         let preview_img = rustbrush_core::color::build_preview(&img, &pixel_plan);
         match preview_img.save(preview_path) {
@@ -192,9 +231,7 @@ fn main() {
         }
     }
 
-    // Group pixels by color
     let paint_groups = painting::group_by_color(&pixel_plan);
-
     let total_pixels: usize = paint_groups.iter().map(|g| g.pixels.len()).sum();
     let total_colors = paint_groups.len();
 
@@ -204,27 +241,31 @@ fn main() {
     );
     println!("Colors used: {}, Total pixels: {}", total_colors, total_pixels);
     println!(
-        "Color matching: {:?}, Dithering: {:?}, Alpha threshold: {}",
-        opts.algorithm, opts.dither, opts.alpha_threshold
+        "Color matching: {:?}, Dithering: {:?}, Strategy: {:?}",
+        opts.algorithm, opts.dither, strategy_name(cli.strategy)
     );
-    if let Some((r, g, b)) = opts.skip_color {
-        println!("Skipping background color: #{:02X}{:02X}{:02X}", r, g, b);
-    }
 
     if cli.dry_run {
+        // In dry-run, generate the plan and show stats
+        let canvas = ScreenRect { x: 0, y: 0, width: cli.canvas_width, height: cli.canvas_height };
+        let plan = build_strategy(cli.strategy).plan(
+            &paint_groups, &canvas, cli.canvas_width, cli.canvas_height,
+            cli.hex_input, 30,
+        );
         println!(
             "\n[DRY RUN] Would paint {} pixels across {} colors.",
             total_pixels, total_colors
         );
         println!(
+            "[DRY RUN] Strategy '{}' generates {} commands.",
+            plan.metadata.strategy_name, plan.metadata.total_commands
+        );
+        println!(
             "[DRY RUN] Estimated time: {:.0}s",
-            total_pixels as f64 * cli.delay_ms as f64 / 1000.0
+            painting::estimate_time(&plan, cli.delay_ms)
         );
         for group in &paint_groups {
-            println!(
-                "  Color #{}: {} pixels",
-                group.hex, group.pixels.len()
-            );
+            println!("  Color #{}: {} pixels", group.hex, group.pixels.len());
         }
         return;
     }
@@ -232,7 +273,6 @@ fn main() {
     // --- Interactive region capture ---
     println!("\n=== Region Capture ===");
     println!("Switch to the Rust game window with the sign editor open.");
-    println!("You'll mark regions by pressing a hotkey, then clicking and dragging.\n");
 
     let canvas_region = match region::capture_region_interactive("Canvas", Keycode::F9) {
         Ok(r) => r,
@@ -263,10 +303,8 @@ fn main() {
     };
 
     let palette_colors = match capture::sample_palette_colors(
-        palette_region.x,
-        palette_region.y,
-        palette_region.width,
-        palette_region.height,
+        palette_region.x, palette_region.y,
+        palette_region.width, palette_region.height,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -274,18 +312,58 @@ fn main() {
             return;
         }
     };
-
     println!("Sampled {} unique colors from palette", palette_colors.len());
 
-    // Countdown before painting
-    println!("\nPainting starts in {} seconds...", cli.startup_delay);
+    // Generate paint plan
+    let screen_rect = ScreenRect {
+        x: canvas_region.x,
+        y: canvas_region.y,
+        width: canvas_region.width,
+        height: canvas_region.height,
+    };
+    let use_hex = hex_input_pos.is_some();
+    let strategy = build_strategy(cli.strategy);
+    let plan = strategy.plan(
+        &paint_groups, &screen_rect,
+        cli.canvas_width, cli.canvas_height,
+        use_hex, 30,
+    );
+
+    println!(
+        "\nPlan: {} commands ({} strategy), est. {:.0}s",
+        plan.metadata.total_commands,
+        plan.metadata.strategy_name,
+        painting::estimate_time(&plan, cli.delay_ms)
+    );
+
+    // Countdown
+    println!("Painting starts in {} seconds...", cli.startup_delay);
     println!("Make sure the brush tool is selected!");
     for i in (1..=cli.startup_delay).rev() {
         println!("  {}...", i);
         std::thread::sleep(Duration::from_secs(1));
     }
 
-    // Set up hotkey controls and start painting
+    // Set up session for save/resume
+    let session_path = if cli.save_session {
+        Some(Session::generate_path(&cli.image.to_string_lossy()))
+    } else {
+        None
+    };
+
+    let mut session = Session::new(
+        plan.clone(),
+        screen_rect,
+        cli.image.to_string_lossy().to_string(),
+        cli.canvas_width,
+        cli.canvas_height,
+    );
+
+    if let Some(ref path) = session_path {
+        println!("Session will be saved to: {}", path.display());
+    }
+
+    // Execute
     let control = PaintControl::new();
     control.start_listener();
 
@@ -298,127 +376,139 @@ fn main() {
         }
     };
 
-    let use_hex = hex_input_pos.is_some();
-    let total_pixels_count = total_pixels;
-    let mut painted = 0usize;
-
-    println!(
-        "Starting painting: {} colors, {} pixels{}",
-        total_colors, total_pixels_count,
-        if use_hex { " (hex input mode)" } else { "" }
-    );
     println!("Controls: F10 = pause/resume, ESC = cancel");
 
-    for (i, group) in paint_groups.iter().enumerate() {
-        if !control.check() {
+    let config = ExecutorConfig {
+        save_interval: if cli.save_session { 500 } else { 0 },
+        session_path: session_path.clone(),
+        progress_interval: 500,
+    };
+
+    let result = executor::execute_plan(
+        &plan, &mut input, &control, &config, Some(&mut session), 0,
+    );
+
+    match result {
+        ExecutionResult::Completed { commands_executed } => {
+            println!("\nPainting complete! {} commands executed.", commands_executed);
+            // Clean up session file on successful completion
+            if let Some(ref path) = session_path {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        ExecutionResult::Cancelled { commands_executed, total_commands } => {
+            let pct = commands_executed as f64 / total_commands as f64 * 100.0;
             println!(
-                "\nPainting cancelled. {}/{} pixels painted ({:.1}%).",
-                painted, total_pixels_count,
-                painted as f64 / total_pixels_count as f64 * 100.0
+                "\nPainting cancelled. {}/{} commands ({:.1}%).",
+                commands_executed, total_commands, pct
             );
-            return;
-        }
-
-        println!(
-            "[{}/{}] Color #{} ({} pixels)",
-            i + 1, total_colors, group.hex, group.pixels.len()
-        );
-
-        // Select the color
-        if let Some(hex_pos) = hex_input_pos {
-            if let Err(e) = select_color_by_hex(&mut input, &group.hex, hex_pos) {
-                eprintln!("Color selection failed: {}", e);
-                return;
-            }
-        } else {
-            let entry = find_nearest_palette_entry(
-                group.color.0, group.color.1, group.color.2,
-                &palette_colors,
-            );
-            if let Err(e) = input.move_to(entry.screen_x, entry.screen_y) {
-                eprintln!("Move failed: {}", e);
-                return;
-            }
-            if let Err(e) = input.click() {
-                eprintln!("Click failed: {}", e);
-                return;
+            if let Some(ref path) = session_path {
+                println!("Session saved. Resume with: rustbrush {} --resume {}", cli.image.display(), path.display());
             }
         }
-
-        std::thread::sleep(Duration::from_millis(30));
-
-        // Paint each pixel in this group
-        for &(px, py) in &group.pixels {
-            if !control.check() {
-                println!(
-                    "\nPainting cancelled. {}/{} pixels painted ({:.1}%).",
-                    painted, total_pixels_count,
-                    painted as f64 / total_pixels_count as f64 * 100.0
-                );
-                return;
-            }
-
-            let (screen_x, screen_y) = painting::pixel_to_screen(
-                px, py,
-                cli.canvas_width, cli.canvas_height,
-                &painting::ScreenRect {
-                    x: canvas_region.x,
-                    y: canvas_region.y,
-                    width: canvas_region.width,
-                    height: canvas_region.height,
-                },
-            );
-
-            if let Err(e) = input.move_to(screen_x, screen_y) {
-                eprintln!("Move failed: {}", e);
-                return;
-            }
-            if let Err(e) = input.click() {
-                eprintln!("Click failed: {}", e);
-                return;
-            }
-
-            painted += 1;
-            if painted % 500 == 0 {
-                let pct = (painted as f64 / total_pixels_count as f64) * 100.0;
-                println!("  Progress: {}/{} ({:.1}%)", painted, total_pixels_count, pct);
+        ExecutionResult::Error { commands_executed, error } => {
+            eprintln!("\nPainting failed after {} commands: {}", commands_executed, error);
+            if let Some(ref path) = session_path {
+                println!("Session saved. Resume with: rustbrush {} --resume {}", cli.image.display(), path.display());
             }
         }
     }
-
-    println!("\nPainting complete! {} pixels painted.", painted);
 }
 
-fn select_color_by_hex(
-    input: &mut impl InputDriver,
-    hex: &str,
-    hex_input_pos: (i32, i32),
-) -> Result<(), String> {
-    input.move_to(hex_input_pos.0, hex_input_pos.1)?;
-    input.click()?;
-    std::thread::sleep(Duration::from_millis(30));
-    input.select_all()?;
-    std::thread::sleep(Duration::from_millis(20));
-    input.type_text(hex)?;
-    std::thread::sleep(Duration::from_millis(20));
-    input.press_key_return()?;
-    std::thread::sleep(Duration::from_millis(30));
-    Ok(())
+fn resume_session(resume_path: &PathBuf, cli: &Cli) {
+    let mut session = match Session::load(resume_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to load session: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if session.is_complete() {
+        println!("Session is already complete.");
+        return;
+    }
+
+    println!(
+        "Resuming session: {} ({:.1}% complete, {} commands remaining)",
+        session.image_path,
+        session.progress_percent(),
+        session.remaining_commands()
+    );
+
+    if !cli.accept_risk {
+        print_disclaimer();
+        if !confirm_proceed() {
+            return;
+        }
+    }
+
+    println!("\nPainting resumes in {} seconds...", cli.startup_delay);
+    for i in (1..=cli.startup_delay).rev() {
+        println!("  {}...", i);
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    let control = PaintControl::new();
+    control.start_listener();
+
+    let delay = Duration::from_millis(cli.delay_ms);
+    let mut input = match SafeInput::new(delay) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("Failed to initialize input: {}", e);
+            return;
+        }
+    };
+
+    let start_index = session.progress;
+    let config = ExecutorConfig {
+        save_interval: 500,
+        session_path: Some(resume_path.clone()),
+        progress_interval: 500,
+    };
+
+    let result = executor::execute_plan(
+        &session.plan.clone(), &mut input, &control, &config,
+        Some(&mut session), start_index,
+    );
+
+    match result {
+        ExecutionResult::Completed { commands_executed } => {
+            println!("\nPainting complete! {} commands executed.", commands_executed);
+            let _ = std::fs::remove_file(resume_path);
+        }
+        ExecutionResult::Cancelled { commands_executed, total_commands } => {
+            let pct = (start_index + commands_executed) as f64 / total_commands as f64 * 100.0;
+            println!(
+                "\nPainting cancelled. Overall {:.1}% complete.",
+                pct
+            );
+            println!("Resume with: rustbrush {} --resume {}", session.image_path, resume_path.display());
+        }
+        ExecutionResult::Error { error, .. } => {
+            eprintln!("\nPainting failed: {}", error);
+            println!("Resume with: rustbrush {} --resume {}", session.image_path, resume_path.display());
+        }
+    }
 }
 
-fn find_nearest_palette_entry(
-    r: u8, g: u8, b: u8,
-    palette: &[capture::PaletteEntry],
-) -> &capture::PaletteEntry {
-    palette
-        .iter()
-        .min_by_key(|e| {
-            let dr = r as i32 - e.r as i32;
-            let dg = g as i32 - e.g as i32;
-            let db = b as i32 - e.b as i32;
-            (dr * dr + dg * dg + db * db) as u32
-        })
-        .unwrap()
+fn build_strategy(choice: StrategyChoice) -> Box<dyn PaintStrategy> {
+    match choice {
+        StrategyChoice::Scanline => Box::new(painting::ScanlineStrategy),
+        StrategyChoice::ColorGrouped => Box::new(painting::ColorGroupedStrategy),
+        StrategyChoice::LineDraw => Box::new(painting::LineDrawStrategy::default()),
+        StrategyChoice::Hybrid => Box::new(painting::HybridStrategy::default()),
+    }
+}
+
+fn strategy_name(choice: StrategyChoice) -> &'static str {
+    match choice {
+        StrategyChoice::Scanline => "scanline",
+        StrategyChoice::ColorGrouped => "color-grouped",
+        StrategyChoice::LineDraw => "line-draw",
+        StrategyChoice::Hybrid => "hybrid",
+    }
 }
 
 fn print_disclaimer() {

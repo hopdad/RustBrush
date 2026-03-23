@@ -25,10 +25,11 @@
 - [x] **Hex code input mode** - Type exact hex colors via the game's color input field
 
 ## Phase 4: Painting Performance
-- [ ] **Line drawing optimization** - Detect horizontal runs and use shift-click
-- [ ] **Hybrid strategy** - Combine color grouping with line detection
+- [x] **Line drawing optimization** - Detect horizontal runs (3+ pixels) and use shift-click
+- [x] **Hybrid strategy** - Color grouping + line detection + nearest-neighbor segment ordering
+- [x] **Paint plan executor** - Command-by-command execution with pause/cancel/resume support
+- [x] **Progress save/resume** - JSON session files with auto-save interval, --resume flag
 - [ ] **Adaptive delays** - Auto-tune click delays based on server responsiveness
-- [ ] **Progress save/resume** - Track painted pixels, resume from interruption
 
 ## Phase 5: GUI & Polish
 - [ ] **GUI mode** - egui/eframe window with image preview, settings, start/stop

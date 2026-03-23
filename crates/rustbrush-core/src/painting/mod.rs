@@ -5,7 +5,7 @@
 
 mod strategy;
 
-pub use strategy::{PaintStrategy, ScanlineStrategy, ColorGroupedStrategy};
+pub use strategy::{PaintStrategy, ScanlineStrategy, ColorGroupedStrategy, LineDrawStrategy, HybridStrategy};
 
 use crate::color::MappedPixel;
 use serde::{Deserialize, Serialize};
