@@ -4,8 +4,10 @@
 //! that can be executed by the platform layer's input driver.
 
 mod strategy;
+mod delay;
 
 pub use strategy::{PaintStrategy, ScanlineStrategy, ColorGroupedStrategy, LineDrawStrategy, HybridStrategy};
+pub use delay::AdaptiveDelay;
 
 use crate::color::MappedPixel;
 use serde::{Deserialize, Serialize};

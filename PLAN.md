@@ -29,11 +29,11 @@
 - [x] **Hybrid strategy** - Color grouping + line detection + nearest-neighbor segment ordering
 - [x] **Paint plan executor** - Command-by-command execution with pause/cancel/resume support
 - [x] **Progress save/resume** - JSON session files with auto-save interval, --resume flag
-- [ ] **Adaptive delays** - Auto-tune click delays based on server responsiveness
+- [x] **Adaptive delays** - AdaptiveDelay controller auto-tunes speed based on success/failure
 
 ## Phase 5: GUI & Polish
 - [x] **GUI mode** - egui/eframe window with image preview, settings, plan generation
 - [x] **GitHub Actions CI** - Build + test on Linux, release Windows binary
-- [ ] **Image editor** - Built-in crop, rotate, brightness/contrast adjustments
-- [ ] **Config file** - Save/load user settings and calibration data
-- [ ] **Adaptive 512-color palette** - K-means clustering in Lab space for optimal hex colors
+- [x] **Image editor** - Brightness, contrast, saturation sliders with reset
+- [x] **Config file** - JSON config save/load at ~/.rustbrush/config.json
+- [x] **Adaptive 512-color palette** - K-means++ clustering in Lab space for optimal hex colors

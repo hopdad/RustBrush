@@ -6,10 +6,12 @@
 mod palette;
 mod matching;
 mod dithering;
+mod adaptive;
 
 pub use palette::{PaletteColor, rust_palette};
 pub use matching::{ColorMatchAlgo, find_nearest_color_rgb, LabPalette};
 pub use dithering::DitherMode;
+pub use adaptive::generate_adaptive_palette;
 
 use image::RgbaImage;
 
