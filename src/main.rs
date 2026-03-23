@@ -12,6 +12,7 @@ mod region;
 mod screen;
 
 use clap::Parser;
+use color::{ColorMatchAlgo, DitherMode, QuantizeOptions};
 use device_query::Keycode;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -73,6 +74,57 @@ struct Cli {
     /// Skip the safety disclaimer confirmation
     #[arg(long)]
     accept_risk: bool,
+
+    /// Color matching algorithm: "ciede2000" (perceptual, default) or "rgb" (fast)
+    #[arg(long, default_value = "ciede2000", value_parser = parse_color_algo)]
+    color_match: ColorMatchAlgo,
+
+    /// Dithering mode: "none" (default), "floyd-steinberg", or "ordered"
+    #[arg(long, default_value = "none", value_parser = parse_dither_mode)]
+    dither: DitherMode,
+
+    /// Alpha threshold (0-255). Pixels with alpha below this are skipped.
+    #[arg(long, default_value_t = 128)]
+    alpha_threshold: u8,
+
+    /// Skip a background color (hex, e.g. "FFFFFF" to skip white)
+    #[arg(long, value_parser = parse_hex_color)]
+    skip_color: Option<(u8, u8, u8)>,
+
+    /// Save a preview of the quantized image to this path before painting
+    #[arg(long)]
+    preview: Option<PathBuf>,
+}
+
+fn parse_color_algo(s: &str) -> Result<ColorMatchAlgo, String> {
+    match s.to_lowercase().as_str() {
+        "ciede2000" | "perceptual" => Ok(ColorMatchAlgo::Ciede2000),
+        "rgb" | "euclidean" => Ok(ColorMatchAlgo::Rgb),
+        _ => Err(format!("Unknown color matching algorithm '{}'. Use 'ciede2000' or 'rgb'.", s)),
+    }
+}
+
+fn parse_dither_mode(s: &str) -> Result<DitherMode, String> {
+    match s.to_lowercase().replace('-', "").as_str() {
+        "none" => Ok(DitherMode::None),
+        "floydsteinberg" | "fs" => Ok(DitherMode::FloydSteinberg),
+        "ordered" | "bayer" => Ok(DitherMode::Ordered),
+        _ => Err(format!(
+            "Unknown dithering mode '{}'. Use 'none', 'floyd-steinberg', or 'ordered'.",
+            s
+        )),
+    }
+}
+
+fn parse_hex_color(s: &str) -> Result<(u8, u8, u8), String> {
+    let s = s.trim_start_matches('#');
+    if s.len() != 6 {
+        return Err("Hex color must be 6 characters (e.g. FFFFFF or #FF0000)".to_string());
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).map_err(|e| e.to_string())?;
+    let g = u8::from_str_radix(&s[2..4], 16).map_err(|e| e.to_string())?;
+    let b = u8::from_str_radix(&s[4..6], 16).map_err(|e| e.to_string())?;
+    Ok((r, g, b))
 }
 
 fn main() {
@@ -104,9 +156,27 @@ fn main() {
         image::imageops::FilterType::Lanczos3,
     );
 
+    // Build quantization options from CLI args
+    let opts = QuantizeOptions {
+        algorithm: cli.color_match,
+        dither: cli.dither,
+        alpha_threshold: cli.alpha_threshold,
+        skip_color: cli.skip_color,
+        ..Default::default()
+    };
+
     // Map every pixel to the nearest Rust in-game palette color
     let palette = color::rust_palette();
-    let pixel_plan = color::map_image_to_palette(&img, &palette);
+    let pixel_plan = color::map_image_to_palette(&img, &palette, &opts);
+
+    // Save preview if requested
+    if let Some(ref preview_path) = cli.preview {
+        let preview_img = color::build_preview(&img, &pixel_plan);
+        match preview_img.save(preview_path) {
+            Ok(()) => println!("Preview saved to: {}", preview_path.display()),
+            Err(e) => eprintln!("Failed to save preview: {}", e),
+        }
+    }
 
     // Group pixels by color for efficient painting
     let paint_groups = painter::group_by_color(&pixel_plan, cli.canvas_width, cli.canvas_height);
@@ -122,6 +192,13 @@ fn main() {
         cli.canvas_height
     );
     println!("Colors used: {}, Total pixels: {}", total_colors, total_pixels);
+    println!(
+        "Color matching: {:?}, Dithering: {:?}, Alpha threshold: {}",
+        opts.algorithm, opts.dither, opts.alpha_threshold
+    );
+    if let Some((r, g, b)) = opts.skip_color {
+        println!("Skipping background color: #{:02X}{:02X}{:02X}", r, g, b);
+    }
 
     if cli.dry_run {
         println!(
