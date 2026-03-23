@@ -36,6 +36,8 @@ pub struct CapturedLayout {
     pub palette: ScreenRegion,
     /// Colors sampled from the palette region, with their screen positions
     pub palette_colors: Vec<PaletteEntry>,
+    /// Screen position of the hex color input field (if using hex mode)
+    pub hex_input_pos: Option<(i32, i32)>,
 }
 
 /// A color found in the palette, with its screen click position.
@@ -48,21 +50,25 @@ pub struct PaletteEntry {
     pub screen_y: i32,
 }
 
-/// Wait for the user to press and release F9 (or the specified key) at two
-/// points to define a rectangular region.
+/// Wait for the user to press a hotkey, then click and drag to define a
+/// rectangular region on screen.
 pub fn capture_region_interactive(label: &str, key: Keycode) -> Result<ScreenRegion, String> {
     let device_state = DeviceState::new();
 
     println!("\n--- {} Capture ---", label);
-    println!("Move your mouse to the TOP-LEFT corner of the {} and press {:?}", label, key);
+    println!("Press {:?} to start, then click and drag to select the {} area.", key, label);
 
-    let p1 = wait_for_key_click_position(&device_state, key)?;
-    println!("  Top-left: ({}, {})", p1.0, p1.1);
+    // Wait for the hotkey to signal readiness
+    wait_for_key_press_and_release(&device_state, key)?;
+    println!("  Now click and drag to draw the {} bounding box...", label);
 
-    println!("Now move to the BOTTOM-RIGHT corner and press {:?}", key);
+    // Wait for mouse button down (start of drag)
+    let p1 = wait_for_mouse_down(&device_state)?;
+    println!("  Start: ({}, {})", p1.0, p1.1);
 
-    let p2 = wait_for_key_click_position(&device_state, key)?;
-    println!("  Bottom-right: ({}, {})", p2.0, p2.1);
+    // Wait for mouse button up (end of drag)
+    let p2 = wait_for_mouse_up(&device_state)?;
+    println!("  End:   ({}, {})", p2.0, p2.1);
 
     let x = p1.0.min(p2.0);
     let y = p1.1.min(p2.1);
@@ -79,6 +85,23 @@ pub fn capture_region_interactive(label: &str, key: Keycode) -> Result<ScreenReg
     let region = ScreenRegion { x, y, width, height };
     println!("  {} region: {}x{} at ({}, {})", label, width, height, x, y);
     Ok(region)
+}
+
+/// Wait for the user to press a hotkey and click to mark a single point on screen.
+pub fn capture_point_interactive(label: &str, key: Keycode) -> Result<(i32, i32), String> {
+    let device_state = DeviceState::new();
+
+    println!("\n--- {} Capture ---", label);
+    println!("Press {:?} to start, then click on the {}.", key, label);
+
+    wait_for_key_press_and_release(&device_state, key)?;
+    println!("  Now click on the {}...", label);
+
+    let pos = wait_for_mouse_down(&device_state)?;
+    // Wait for release so the click doesn't interfere
+    wait_for_mouse_up(&device_state)?;
+    println!("  {}: ({}, {})", label, pos.0, pos.1);
+    Ok(pos)
 }
 
 /// Sample colors from a captured palette region by reading screen pixels.
@@ -149,11 +172,11 @@ fn has_similar_color(entries: &[PaletteEntry], r: u8, g: u8, b: u8, threshold: u
     })
 }
 
-/// Wait for the user to press the specified key and return the mouse position.
-fn wait_for_key_click_position(
+/// Wait for the user to press and release the specified key.
+fn wait_for_key_press_and_release(
     device_state: &DeviceState,
     key: Keycode,
-) -> Result<(i32, i32), String> {
+) -> Result<(), String> {
     // Wait for key to be released first (in case it's already held)
     while device_state.get_keys().contains(&key) {
         std::thread::sleep(Duration::from_millis(50));
@@ -163,24 +186,61 @@ fn wait_for_key_click_position(
     loop {
         let keys = device_state.get_keys();
         if keys.contains(&key) {
-            let mouse = device_state.get_mouse();
-            let pos = (mouse.coords.0, mouse.coords.1);
-
-            // Wait for release to avoid double-triggering
+            // Wait for release to avoid interfering with the drag
             while device_state.get_keys().contains(&key) {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            // Small debounce
             std::thread::sleep(Duration::from_millis(200));
-
-            return Ok(pos);
+            return Ok(());
         }
 
-        // Check for ESC to cancel
         if keys.contains(&Keycode::Escape) {
             return Err("Cancelled by user".into());
         }
 
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Wait for the left mouse button to be pressed; return the position.
+fn wait_for_mouse_down(device_state: &DeviceState) -> Result<(i32, i32), String> {
+    // Make sure mouse is currently up before we start
+    while is_left_button_pressed(device_state) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    loop {
+        if device_state.get_keys().contains(&Keycode::Escape) {
+            return Err("Cancelled by user".into());
+        }
+
+        if is_left_button_pressed(device_state) {
+            let mouse = device_state.get_mouse();
+            return Ok((mouse.coords.0, mouse.coords.1));
+        }
+
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Wait for the left mouse button to be released; return the position.
+fn wait_for_mouse_up(device_state: &DeviceState) -> Result<(i32, i32), String> {
+    loop {
+        if device_state.get_keys().contains(&Keycode::Escape) {
+            return Err("Cancelled by user".into());
+        }
+
+        if !is_left_button_pressed(device_state) {
+            let mouse = device_state.get_mouse();
+            return Ok((mouse.coords.0, mouse.coords.1));
+        }
+
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Check if the left mouse button (button index 1) is currently pressed.
+fn is_left_button_pressed(device_state: &DeviceState) -> bool {
+    let mouse = device_state.get_mouse();
+    mouse.button_pressed.get(1).copied().unwrap_or(false)
 }

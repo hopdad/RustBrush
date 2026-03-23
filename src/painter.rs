@@ -71,10 +71,33 @@ fn find_nearest_palette_entry(r: u8, g: u8, b: u8, palette: &[PaletteEntry]) -> 
         .unwrap()
 }
 
+/// Select a color by typing its hex code into the game's hex input field.
+fn select_color_by_hex(
+    input: &mut SafeInput,
+    hex: &str,
+    hex_input_pos: (i32, i32),
+) -> Result<(), String> {
+    // Click the hex input field
+    input.move_to(hex_input_pos.0, hex_input_pos.1)?;
+    input.click()?;
+    std::thread::sleep(Duration::from_millis(30));
+
+    // Select all existing text and replace with new hex code
+    input.select_all()?;
+    std::thread::sleep(Duration::from_millis(20));
+    input.type_text(hex)?;
+    std::thread::sleep(Duration::from_millis(20));
+
+    // Press Enter to apply the color
+    input.press_key(enigo::Key::Return)?;
+    std::thread::sleep(Duration::from_millis(30));
+    Ok(())
+}
+
 /// Paint all color groups onto the canvas using captured screen regions.
 ///
 /// This is the main painting function. It:
-/// 1. Selects each color by clicking its position in the palette
+/// 1. Selects each color by clicking its position in the palette (or typing hex)
 /// 2. Paints all pixels of that color on the canvas
 /// 3. Checks hotkeys between actions for pause/cancel
 pub fn paint(
@@ -88,8 +111,14 @@ pub fn paint(
     let mut input = SafeInput::new(delay)?;
     let total_pixels: usize = groups.iter().map(|g| g.pixels.len()).sum();
     let mut painted = 0usize;
+    let use_hex = layout.hex_input_pos.is_some();
 
-    println!("Starting painting: {} colors, {} pixels", groups.len(), total_pixels);
+    println!(
+        "Starting painting: {} colors, {} pixels{}",
+        groups.len(),
+        total_pixels,
+        if use_hex { " (hex input mode)" } else { "" }
+    );
     println!("Controls: F10 = pause/resume, ESC = cancel");
 
     for (i, group) in groups.iter().enumerate() {
@@ -105,10 +134,19 @@ pub fn paint(
             group.pixels.len()
         );
 
-        // Find the closest color in the sampled palette and click it
-        let entry = find_nearest_palette_entry(group.color.0, group.color.1, group.color.2, &layout.palette_colors);
-        input.move_to(entry.screen_x, entry.screen_y)?;
-        input.click()?;
+        // Select the color - either by hex input or palette click
+        if let Some(hex_pos) = layout.hex_input_pos {
+            select_color_by_hex(&mut input, &group.hex, hex_pos)?;
+        } else {
+            let entry = find_nearest_palette_entry(
+                group.color.0,
+                group.color.1,
+                group.color.2,
+                &layout.palette_colors,
+            );
+            input.move_to(entry.screen_x, entry.screen_y)?;
+            input.click()?;
+        }
 
         // Small delay for color picker UI to update
         std::thread::sleep(Duration::from_millis(30));

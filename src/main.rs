@@ -31,10 +31,16 @@ SAFETY DISCLAIMER:
 WORKFLOW:
   1. Open the sign editor in Rust and select the brush tool
   2. Run rustbrush with your image
-  3. Press F9 at the top-left then bottom-right of the CANVAS
-  4. Press F10 at the top-left then bottom-right of the COLOR PALETTE
+  3. Press F9, then click and drag to select the CANVAS area
+  4. Press F8, then click and drag to select the COLOR PALETTE area
   5. Painting begins after a countdown
   6. During painting: F10 = pause/resume, ESC = cancel
+
+HEX INPUT MODE (--hex-input):
+  For exact color reproduction, use --hex-input to type hex codes
+  directly into the game's color input field instead of clicking
+  the palette. After marking canvas (F9), you'll also press F7
+  and click on the hex input field.
 ")]
 struct Cli {
     /// Path to the image file to paint
@@ -59,6 +65,10 @@ struct Cli {
     /// Seconds to wait before painting starts (after region capture)
     #[arg(short, long, default_value_t = 3)]
     startup_delay: u32,
+
+    /// Use hex code input for exact colors (requires marking the hex input field)
+    #[arg(long)]
+    hex_input: bool,
 
     /// Skip the safety disclaimer confirmation
     #[arg(long)]
@@ -134,7 +144,7 @@ fn main() {
     // --- Interactive region capture ---
     println!("\n=== Region Capture ===");
     println!("Switch to the Rust game window with the sign editor open.");
-    println!("You'll mark the canvas and palette regions using hotkeys.\n");
+    println!("You'll mark regions by pressing a hotkey, then clicking and dragging.\n");
 
     // Capture canvas region (F9)
     let canvas = match region::capture_region_interactive("Canvas", Keycode::F9) {
@@ -145,7 +155,20 @@ fn main() {
         }
     };
 
-    // Capture palette region (F10)
+    // Capture hex input position if hex mode is enabled
+    let hex_input_pos = if cli.hex_input {
+        match region::capture_point_interactive("Hex color input field", Keycode::F7) {
+            Ok(pos) => Some(pos),
+            Err(e) => {
+                eprintln!("Hex input capture failed: {}", e);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    // Capture palette region (F8) - still needed even in hex mode for fallback
     let palette_region = match region::capture_region_interactive("Palette", Keycode::F8) {
         Ok(r) => r,
         Err(e) => {
@@ -167,6 +190,7 @@ fn main() {
         canvas,
         palette: palette_region,
         palette_colors,
+        hex_input_pos,
     };
 
     // Countdown before painting

@@ -63,6 +63,21 @@ impl SafeInput {
         Ok(())
     }
 
+    /// Select all text in the current input field (Ctrl+A).
+    pub fn select_all(&mut self) -> Result<(), String> {
+        self.enigo
+            .key(Key::Control, Direction::Press)
+            .map_err(|e| format!("Key press failed: {}", e))?;
+        self.enigo
+            .key(Key::Unicode('a'), Direction::Click)
+            .map_err(|e| format!("Key press failed: {}", e))?;
+        self.enigo
+            .key(Key::Control, Direction::Release)
+            .map_err(|e| format!("Key press failed: {}", e))?;
+        std::thread::sleep(self.delay);
+        Ok(())
+    }
+
     /// Type a text string (for entering hex codes in the color picker).
     pub fn type_text(&mut self, text: &str) -> Result<(), String> {
         self.enigo
