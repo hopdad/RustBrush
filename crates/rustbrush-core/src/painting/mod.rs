@@ -105,6 +105,37 @@ pub fn estimate_time(plan: &PaintPlan, delay_ms: u64) -> f64 {
     plan.commands.len() as f64 * delay_ms as f64 / 1000.0
 }
 
+/// Approximate paint time without generating a full plan.
+///
+/// Uses heuristic multipliers per strategy to estimate command count from pixel
+/// and color counts. Useful for live UI feedback before a plan is generated.
+pub fn estimate_time_approx(
+    total_pixels: usize,
+    num_colors: usize,
+    strategy: &str,
+    delay_ms: u64,
+    use_hex: bool,
+) -> f64 {
+    // Approximate commands per pixel by strategy
+    let commands_per_pixel: f64 = match strategy {
+        "hybrid" => 1.2,
+        "line-draw" => 1.5,
+        "color-grouped" => 2.0,
+        "scanline" => 2.3,
+        _ => 2.0,
+    };
+
+    // Color switch overhead: ~2 commands per switch with hex, ~1 without
+    let color_switch_commands = if use_hex {
+        num_colors as f64 * 2.0
+    } else {
+        num_colors as f64
+    };
+
+    let total_commands = (total_pixels as f64 * commands_per_pixel) + color_switch_commands;
+    total_commands * delay_ms as f64 / 1000.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +169,21 @@ mod tests {
     fn test_empty_pixels_group() {
         let groups = group_by_color(&[]);
         assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn test_estimate_time_approx() {
+        // 1000 pixels, 10 colors, hybrid strategy, 15ms delay, hex input
+        let est = super::estimate_time_approx(1000, 10, "hybrid", 15, true);
+        // Expected: (1000 * 1.2 + 10 * 2.0) * 15 / 1000 = 1220 * 0.015 = 18.3
+        assert!((est - 18.3).abs() < 0.1);
+
+        // Same but scanline: (1000 * 2.3 + 10 * 2.0) * 15 / 1000 = 2320 * 0.015 = 34.8
+        let est2 = super::estimate_time_approx(1000, 10, "scanline", 15, true);
+        assert!((est2 - 34.8).abs() < 0.1);
+
+        // Without hex: (1000 * 2.0 + 10 * 1.0) * 15 / 1000 = 2010 * 0.015 = 30.15
+        let est3 = super::estimate_time_approx(1000, 10, "color-grouped", 15, false);
+        assert!((est3 - 30.15).abs() < 0.1);
     }
 }

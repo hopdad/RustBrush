@@ -40,6 +40,8 @@ pub struct Config {
     pub contrast: f32,
     /// Image saturation adjustment (1.0 = unchanged).
     pub saturation: f32,
+    /// Quality preset: "speed", "balanced", "quality", "maximum", or "custom".
+    pub quality_preset: String,
 }
 
 impl Default for Config {
@@ -61,6 +63,7 @@ impl Default for Config {
             brightness: 1.0,
             contrast: 1.0,
             saturation: 1.0,
+            quality_preset: "balanced".to_string(),
         }
     }
 }

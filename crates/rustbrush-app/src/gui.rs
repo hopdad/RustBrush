@@ -10,6 +10,8 @@ use rustbrush_core::config::Config;
 use rustbrush_core::image as rb_image;
 use rustbrush_core::painting::{self, ColorGroup, PaintPlan, PaintStrategy, ScreenRect};
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 fn main() -> eframe::Result {
     env_logger::init();
@@ -63,6 +65,20 @@ struct RustBrushApp {
     adaptive_palette: bool,
     adaptive_colors: usize,
 
+    // Quality preset
+    quality_preset: QualityPreset,
+
+    // Background processing
+    bg_result_rx: Option<mpsc::Receiver<ProcessResult>>,
+    settings_generation: u64,
+    last_settings_change: Instant,
+    pending_reprocess: bool,
+
+    // Time estimation
+    estimated_time_secs: Option<f64>,
+    last_pixel_count: Option<usize>,
+    last_color_count: Option<usize>,
+
     // UI state
     status_message: String,
     processing: bool,
@@ -106,6 +122,67 @@ impl StrategyChoice {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QualityPreset {
+    Speed,
+    Balanced,
+    Quality,
+    Maximum,
+    Custom,
+}
+
+impl QualityPreset {
+    fn label(&self) -> &str {
+        match self {
+            Self::Speed => "Speed",
+            Self::Balanced => "Balanced",
+            Self::Quality => "Quality",
+            Self::Maximum => "Maximum",
+            Self::Custom => "Custom",
+        }
+    }
+
+    fn description(&self) -> &str {
+        match self {
+            Self::Speed => "Hybrid + RGB + No dither",
+            Self::Balanced => "Hybrid + RGB + Ordered dither",
+            Self::Quality => "Grouped + CIEDE2000 + F-S dither + Adaptive 128",
+            Self::Maximum => "Scanline + CIEDE2000 + F-S dither + Adaptive 512",
+            Self::Custom => "Custom settings",
+        }
+    }
+
+    fn to_config_str(&self) -> &str {
+        match self {
+            Self::Speed => "speed",
+            Self::Balanced => "balanced",
+            Self::Quality => "quality",
+            Self::Maximum => "maximum",
+            Self::Custom => "custom",
+        }
+    }
+
+    fn from_config_str(s: &str) -> Self {
+        match s {
+            "speed" => Self::Speed,
+            "quality" => Self::Quality,
+            "maximum" => Self::Maximum,
+            "custom" => Self::Custom,
+            _ => Self::Balanced,
+        }
+    }
+}
+
+/// Result sent back from the background processing thread.
+struct ProcessResult {
+    preview_image: image::RgbaImage,
+    mapped_pixels: Vec<MappedPixel>,
+    paint_groups: Vec<ColorGroup>,
+    total_pixels: usize,
+    total_colors: usize,
+    generation: u64,
+}
+
 impl RustBrushApp {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let config = Config::load_default();
@@ -146,6 +223,17 @@ impl RustBrushApp {
 
             adaptive_palette: config.adaptive_palette,
             adaptive_colors: config.adaptive_colors,
+
+            quality_preset: QualityPreset::from_config_str(&config.quality_preset),
+
+            bg_result_rx: None,
+            settings_generation: 0,
+            last_settings_change: Instant::now(),
+            pending_reprocess: false,
+
+            estimated_time_secs: None,
+            last_pixel_count: None,
+            last_color_count: None,
 
             status_message: "Load an image to get started.".to_string(),
             processing: false,
@@ -196,6 +284,7 @@ impl RustBrushApp {
             brightness: self.brightness,
             contrast: self.contrast,
             saturation: self.saturation,
+            quality_preset: self.quality_preset.to_config_str().to_string(),
         };
         let _ = config.save_default();
     }
@@ -211,88 +300,16 @@ impl RustBrushApp {
                 self.mapped_pixels = None;
                 self.paint_groups = None;
                 self.paint_plan = None;
-                self.status_message =
-                    "Image loaded. Adjust settings and click Process.".to_string();
+                self.last_pixel_count = None;
+                self.last_color_count = None;
+                self.update_time_estimate();
+                self.mark_settings_changed(true);
+                self.status_message = "Image loaded. Processing...".to_string();
             }
             Err(e) => {
                 self.status_message = format!("Failed to load image: {}", e);
             }
         }
-    }
-
-    fn process_image(&mut self) {
-        let Some(ref source) = self.source_image else {
-            self.status_message = "No image loaded.".to_string();
-            return;
-        };
-
-        self.processing = true;
-        let w = self.canvas_width();
-        let h = self.canvas_height();
-
-        // Resize
-        let mut resized = rb_image::resize(source, w, h, rb_image::AspectRatio::Stretch);
-
-        // Apply image adjustments
-        if (self.brightness - 1.0).abs() > 0.01 {
-            resized = rb_image::adjust_brightness(&resized, self.brightness);
-        }
-        if (self.contrast - 1.0).abs() > 0.01 {
-            resized = rb_image::adjust_contrast(&resized, self.contrast);
-        }
-        if (self.saturation - 1.0).abs() > 0.01 {
-            resized = rb_image::adjust_saturation(&resized, self.saturation);
-        }
-
-        // Parse skip color
-        let skip_color = if self.skip_color_enabled {
-            parse_hex_color(&self.skip_color_hex).ok()
-        } else {
-            None
-        };
-
-        // Determine palette
-        let palette = if self.adaptive_palette {
-            generate_adaptive_palette(&resized, self.adaptive_colors)
-        } else {
-            rust_palette()
-        };
-
-        // Quantize
-        let opts = QuantizeOptions {
-            algorithm: self.color_match,
-            dither: self.dither,
-            alpha_threshold: self.alpha_threshold,
-            skip_color,
-            ..Default::default()
-        };
-
-        let mapped = map_image_to_palette(&resized, &palette, &opts);
-        let preview = build_preview(&resized, &mapped);
-        let groups = painting::group_by_color(&mapped);
-
-        let total_pixels: usize = groups.iter().map(|g| g.pixels.len()).sum();
-        let total_colors = groups.len();
-
-        self.mapped_pixels = Some(mapped);
-        self.preview_image = Some(preview);
-        self.preview_texture = None;
-        self.paint_groups = Some(groups);
-        self.paint_plan = None;
-
-        self.status_message = format!(
-            "Processed: {}x{}, {} colors ({}), {} pixels.",
-            w,
-            h,
-            total_colors,
-            if self.adaptive_palette {
-                format!("adaptive {}", self.adaptive_colors)
-            } else {
-                "fixed 32".to_string()
-            },
-            total_pixels
-        );
-        self.processing = false;
     }
 
     fn generate_plan(&mut self) {
@@ -331,10 +348,207 @@ impl RustBrushApp {
         );
         self.paint_plan = Some(plan);
     }
+
+    fn apply_quality_preset(&mut self, preset: QualityPreset) {
+        self.quality_preset = preset;
+        match preset {
+            QualityPreset::Speed => {
+                self.strategy = StrategyChoice::Hybrid;
+                self.dither = DitherMode::None;
+                self.color_match = ColorMatchAlgo::Rgb;
+                self.delay_ms = 5;
+                self.adaptive_palette = false;
+            }
+            QualityPreset::Balanced => {
+                self.strategy = StrategyChoice::Hybrid;
+                self.dither = DitherMode::Ordered;
+                self.color_match = ColorMatchAlgo::Rgb;
+                self.delay_ms = 10;
+                self.adaptive_palette = false;
+            }
+            QualityPreset::Quality => {
+                self.strategy = StrategyChoice::ColorGrouped;
+                self.dither = DitherMode::FloydSteinberg;
+                self.color_match = ColorMatchAlgo::Ciede2000;
+                self.delay_ms = 15;
+                self.adaptive_palette = true;
+                self.adaptive_colors = 128;
+            }
+            QualityPreset::Maximum => {
+                self.strategy = StrategyChoice::Scanline;
+                self.dither = DitherMode::FloydSteinberg;
+                self.color_match = ColorMatchAlgo::Ciede2000;
+                self.delay_ms = 30;
+                self.adaptive_palette = true;
+                self.adaptive_colors = 512;
+            }
+            QualityPreset::Custom => {}
+        }
+        self.mark_settings_changed(preset != QualityPreset::Custom);
+    }
+
+    /// Mark that settings have changed; triggers debounced reprocess if `needs_reprocess`.
+    fn mark_settings_changed(&mut self, needs_reprocess: bool) {
+        self.settings_generation += 1;
+        self.last_settings_change = Instant::now();
+        if needs_reprocess {
+            self.pending_reprocess = true;
+        }
+        self.update_time_estimate();
+    }
+
+    /// Update the approximate time estimate using heuristics.
+    fn update_time_estimate(&mut self) {
+        let pixels = self.last_pixel_count.unwrap_or_else(|| {
+            (self.canvas_width() as usize) * (self.canvas_height() as usize)
+        });
+        let colors = self.last_color_count.unwrap_or(if self.adaptive_palette {
+            self.adaptive_colors
+        } else {
+            20 // rough guess for fixed palette usage
+        });
+        let use_hex = self.hex_input || self.adaptive_palette;
+        self.estimated_time_secs = Some(painting::estimate_time_approx(
+            pixels,
+            colors,
+            self.strategy.to_config_str(),
+            self.delay_ms as u64,
+            use_hex,
+        ));
+    }
+
+    /// Spawn a background thread to process the image with current settings.
+    fn start_background_process(&mut self) {
+        let Some(ref source) = self.source_image else {
+            return;
+        };
+
+        let source = source.clone();
+        let w = self.canvas_width();
+        let h = self.canvas_height();
+        let brightness = self.brightness;
+        let contrast = self.contrast;
+        let saturation = self.saturation;
+        let skip_color_enabled = self.skip_color_enabled;
+        let skip_color_hex = self.skip_color_hex.clone();
+        let adaptive_palette = self.adaptive_palette;
+        let adaptive_colors = self.adaptive_colors;
+        let color_match = self.color_match;
+        let dither = self.dither;
+        let alpha_threshold = self.alpha_threshold;
+        let generation = self.settings_generation;
+
+        let (tx, rx) = mpsc::channel();
+        self.bg_result_rx = Some(rx);
+        self.processing = true;
+
+        std::thread::spawn(move || {
+            // Resize
+            let mut resized = rb_image::resize(&source, w, h, rb_image::AspectRatio::Stretch);
+
+            // Apply adjustments
+            if (brightness - 1.0).abs() > 0.01 {
+                resized = rb_image::adjust_brightness(&resized, brightness);
+            }
+            if (contrast - 1.0).abs() > 0.01 {
+                resized = rb_image::adjust_contrast(&resized, contrast);
+            }
+            if (saturation - 1.0).abs() > 0.01 {
+                resized = rb_image::adjust_saturation(&resized, saturation);
+            }
+
+            // Parse skip color
+            let skip_color = if skip_color_enabled {
+                parse_hex_color(&skip_color_hex).ok()
+            } else {
+                None
+            };
+
+            // Determine palette
+            let palette = if adaptive_palette {
+                generate_adaptive_palette(&resized, adaptive_colors)
+            } else {
+                rust_palette()
+            };
+
+            // Quantize
+            let opts = QuantizeOptions {
+                algorithm: color_match,
+                dither,
+                alpha_threshold,
+                skip_color,
+                ..Default::default()
+            };
+
+            let mapped = map_image_to_palette(&resized, &palette, &opts);
+            let preview = build_preview(&resized, &mapped);
+            let groups = painting::group_by_color(&mapped);
+
+            let total_pixels: usize = groups.iter().map(|g| g.pixels.len()).sum();
+            let total_colors = groups.len();
+
+            let _ = tx.send(ProcessResult {
+                preview_image: preview,
+                mapped_pixels: mapped,
+                paint_groups: groups,
+                total_pixels,
+                total_colors,
+                generation,
+            });
+        });
+    }
 }
 
 impl eframe::App for RustBrushApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll background processing results
+        if let Some(ref rx) = self.bg_result_rx {
+            if let Ok(result) = rx.try_recv() {
+                // Only apply if this result matches current generation
+                if result.generation == self.settings_generation {
+                    let total_pixels = result.total_pixels;
+                    let total_colors = result.total_colors;
+                    let w = self.canvas_width();
+                    let h = self.canvas_height();
+
+                    self.mapped_pixels = Some(result.mapped_pixels);
+                    self.preview_image = Some(result.preview_image);
+                    self.preview_texture = None; // force re-upload
+                    self.paint_groups = Some(result.paint_groups);
+                    self.paint_plan = None;
+                    self.last_pixel_count = Some(total_pixels);
+                    self.last_color_count = Some(total_colors);
+                    self.processing = false;
+                    self.bg_result_rx = None;
+                    self.update_time_estimate();
+                    self.status_message = format!(
+                        "Processed: {}x{}, {} colors, {} pixels.",
+                        w, h, total_colors, total_pixels
+                    );
+                } else {
+                    // Stale result — discard and re-queue
+                    self.processing = false;
+                    self.bg_result_rx = None;
+                    self.pending_reprocess = true;
+                }
+            }
+        }
+
+        // Debounced auto-reprocess
+        if self.pending_reprocess
+            && self.source_image.is_some()
+            && self.bg_result_rx.is_none()
+            && self.last_settings_change.elapsed() >= Duration::from_millis(500)
+        {
+            self.pending_reprocess = false;
+            self.start_background_process();
+        }
+
+        // Keep polling while background task is active
+        if self.bg_result_rx.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -430,6 +644,48 @@ impl RustBrushApp {
 
         ui.separator();
 
+        // --- Quality Preset ---
+        ui.heading("Quality");
+        let mut preset_changed = false;
+        ui.horizontal_wrapped(|ui| {
+            for preset in [
+                QualityPreset::Speed,
+                QualityPreset::Balanced,
+                QualityPreset::Quality,
+                QualityPreset::Maximum,
+            ] {
+                if ui
+                    .selectable_label(self.quality_preset == preset, preset.label())
+                    .clicked()
+                {
+                    self.apply_quality_preset(preset);
+                    preset_changed = true;
+                }
+            }
+        });
+        if self.quality_preset == QualityPreset::Custom {
+            ui.small("Custom settings");
+        } else {
+            ui.small(self.quality_preset.description());
+        }
+
+        // Live time estimate
+        if let Some(est) = self.estimated_time_secs {
+            let mins = (est / 60.0).floor() as u64;
+            let secs = (est % 60.0).round() as u64;
+            if mins > 0 {
+                ui.label(format!("Est. paint time: ~{}m {}s", mins, secs));
+            } else {
+                ui.label(format!("Est. paint time: ~{}s", secs));
+            }
+        }
+        if self.processing {
+            ui.spinner();
+            ui.small("Processing...");
+        }
+
+        ui.separator();
+
         // --- Image Adjustments ---
         ui.heading("Adjustments");
         let mut adj_changed = false;
@@ -449,29 +705,28 @@ impl RustBrushApp {
             adj_changed = true;
         }
         if adj_changed {
-            // Clear preview so user re-processes
-            self.preview_image = None;
-            self.preview_texture = None;
-            self.mapped_pixels = None;
-            self.paint_groups = None;
-            self.paint_plan = None;
+            self.mark_settings_changed(true);
         }
 
         ui.separator();
 
         // --- Canvas Size ---
         ui.heading("Canvas");
-        ui.checkbox(&mut self.use_custom_size, "Custom size");
+        let mut canvas_changed = false;
+        canvas_changed |= ui.checkbox(&mut self.use_custom_size, "Custom size").changed();
 
         if self.use_custom_size {
             ui.horizontal(|ui| {
-                ui.label("W:");
-                ui.add(egui::DragValue::new(&mut self.custom_width).range(8..=2048));
-                ui.label("H:");
-                ui.add(egui::DragValue::new(&mut self.custom_height).range(8..=2048));
+                canvas_changed |= ui
+                    .add(egui::DragValue::new(&mut self.custom_width).range(8..=2048).prefix("W: "))
+                    .changed();
+                canvas_changed |= ui
+                    .add(egui::DragValue::new(&mut self.custom_height).range(8..=2048).prefix("H: "))
+                    .changed();
             });
         } else {
             let presets = canvas::all_presets();
+            let before = self.canvas_preset_idx;
             egui::ComboBox::from_label("Preset")
                 .selected_text(presets[self.canvas_preset_idx].to_string())
                 .show_ui(ui, |ui| {
@@ -483,94 +738,30 @@ impl RustBrushApp {
                         );
                     }
                 });
+            canvas_changed |= self.canvas_preset_idx != before;
         }
         ui.label(format!(
             "Canvas: {}x{}",
             self.canvas_width(),
             self.canvas_height()
         ));
-
-        ui.separator();
-
-        // --- Color Matching ---
-        ui.heading("Color");
-        egui::ComboBox::from_label("Matching")
-            .selected_text(match self.color_match {
-                ColorMatchAlgo::Ciede2000 => "CIEDE2000 (perceptual)",
-                ColorMatchAlgo::Rgb => "RGB (fast)",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut self.color_match,
-                    ColorMatchAlgo::Ciede2000,
-                    "CIEDE2000 (perceptual)",
-                );
-                ui.selectable_value(&mut self.color_match, ColorMatchAlgo::Rgb, "RGB (fast)");
-            });
-
-        egui::ComboBox::from_label("Dithering")
-            .selected_text(match self.dither {
-                DitherMode::None => "None",
-                DitherMode::FloydSteinberg => "Floyd-Steinberg",
-                DitherMode::Ordered => "Ordered (Bayer)",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.dither, DitherMode::None, "None");
-                ui.selectable_value(
-                    &mut self.dither,
-                    DitherMode::FloydSteinberg,
-                    "Floyd-Steinberg",
-                );
-                ui.selectable_value(&mut self.dither, DitherMode::Ordered, "Ordered (Bayer)");
-            });
-
-        ui.add(
-            egui::Slider::new(&mut self.alpha_threshold, 0..=255).text("Alpha threshold"),
-        );
-
-        ui.checkbox(&mut self.skip_color_enabled, "Skip background color");
-        if self.skip_color_enabled {
-            ui.horizontal(|ui| {
-                ui.label("#");
-                ui.text_edit_singleline(&mut self.skip_color_hex);
-            });
+        if canvas_changed {
+            self.mark_settings_changed(true);
         }
 
         ui.separator();
 
-        // --- Adaptive Palette ---
-        ui.heading("Palette");
-        ui.checkbox(&mut self.adaptive_palette, "Adaptive palette (k-means)")
-            .on_hover_text("Generate optimal colors from the image via clustering");
-        if self.adaptive_palette {
-            ui.add(
-                egui::Slider::new(&mut self.adaptive_colors, 16..=512)
-                    .text("Colors")
-                    .logarithmic(true),
-            );
-            ui.label("Requires hex input mode");
-        }
-
-        ui.separator();
-
-        // --- Strategy ---
-        ui.heading("Painting");
-        egui::ComboBox::from_label("Strategy")
-            .selected_text(self.strategy.label())
-            .show_ui(ui, |ui| {
-                for s in [
-                    StrategyChoice::Hybrid,
-                    StrategyChoice::ColorGrouped,
-                    StrategyChoice::LineDraw,
-                    StrategyChoice::Scanline,
-                ] {
-                    ui.selectable_value(&mut self.strategy, s, s.label());
-                }
+        // --- Advanced Settings (collapsible) ---
+        let advanced_label = if self.quality_preset == QualityPreset::Custom {
+            "Advanced Settings (customized)"
+        } else {
+            "Advanced Settings"
+        };
+        egui::CollapsingHeader::new(advanced_label)
+            .default_open(self.quality_preset == QualityPreset::Custom)
+            .show(ui, |ui| {
+                self.advanced_settings_ui(ui);
             });
-
-        ui.add(egui::Slider::new(&mut self.delay_ms, 5..=100).text("Delay (ms)"));
-        ui.checkbox(&mut self.hex_input, "Hex input mode");
-        ui.checkbox(&mut self.save_session, "Auto-save session");
 
         ui.separator();
 
@@ -582,11 +773,11 @@ impl RustBrushApp {
 
         ui.add_enabled_ui(has_image && !self.processing, |ui| {
             if ui
-                .button("Process Image")
-                .on_hover_text("Resize, adjust, color-match, and dither the image")
+                .button("Reprocess Now")
+                .on_hover_text("Manually re-run image processing")
                 .clicked()
             {
-                self.process_image();
+                self.start_background_process();
             }
         });
 
@@ -631,6 +822,120 @@ impl RustBrushApp {
             if groups.len() > max_show {
                 ui.label(format!("...and {} more", groups.len() - max_show));
             }
+        }
+    }
+
+    fn advanced_settings_ui(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+
+        // --- Color Matching ---
+        ui.label("Color Matching");
+        let cm_before = self.color_match;
+        egui::ComboBox::from_label("Matching")
+            .selected_text(match self.color_match {
+                ColorMatchAlgo::Ciede2000 => "CIEDE2000 (perceptual)",
+                ColorMatchAlgo::Rgb => "RGB (fast)",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.color_match,
+                    ColorMatchAlgo::Ciede2000,
+                    "CIEDE2000 (perceptual)",
+                );
+                ui.selectable_value(&mut self.color_match, ColorMatchAlgo::Rgb, "RGB (fast)");
+            });
+        changed |= self.color_match != cm_before;
+
+        let dither_before = self.dither;
+        egui::ComboBox::from_label("Dithering")
+            .selected_text(match self.dither {
+                DitherMode::None => "None",
+                DitherMode::FloydSteinberg => "Floyd-Steinberg",
+                DitherMode::Ordered => "Ordered (Bayer)",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.dither, DitherMode::None, "None");
+                ui.selectable_value(
+                    &mut self.dither,
+                    DitherMode::FloydSteinberg,
+                    "Floyd-Steinberg",
+                );
+                ui.selectable_value(&mut self.dither, DitherMode::Ordered, "Ordered (Bayer)");
+            });
+        changed |= self.dither != dither_before;
+
+        let alpha_before = self.alpha_threshold;
+        ui.add(
+            egui::Slider::new(&mut self.alpha_threshold, 0..=255).text("Alpha threshold"),
+        );
+        changed |= self.alpha_threshold != alpha_before;
+
+        let skip_before = self.skip_color_enabled;
+        ui.checkbox(&mut self.skip_color_enabled, "Skip background color");
+        changed |= self.skip_color_enabled != skip_before;
+        if self.skip_color_enabled {
+            ui.horizontal(|ui| {
+                ui.label("#");
+                ui.text_edit_singleline(&mut self.skip_color_hex);
+            });
+        }
+
+        ui.separator();
+
+        // --- Adaptive Palette ---
+        ui.label("Palette");
+        let ap_before = self.adaptive_palette;
+        ui.checkbox(&mut self.adaptive_palette, "Adaptive palette (k-means)")
+            .on_hover_text("Generate optimal colors from the image via clustering");
+        changed |= self.adaptive_palette != ap_before;
+        if self.adaptive_palette {
+            let ac_before = self.adaptive_colors;
+            ui.add(
+                egui::Slider::new(&mut self.adaptive_colors, 16..=512)
+                    .text("Colors")
+                    .logarithmic(true),
+            );
+            changed |= self.adaptive_colors != ac_before;
+            ui.small("Requires hex input mode");
+        }
+
+        ui.separator();
+
+        // --- Strategy ---
+        ui.label("Painting");
+        let strat_before = self.strategy;
+        egui::ComboBox::from_label("Strategy")
+            .selected_text(self.strategy.label())
+            .show_ui(ui, |ui| {
+                for s in [
+                    StrategyChoice::Hybrid,
+                    StrategyChoice::ColorGrouped,
+                    StrategyChoice::LineDraw,
+                    StrategyChoice::Scanline,
+                ] {
+                    ui.selectable_value(&mut self.strategy, s, s.label());
+                }
+            });
+        changed |= self.strategy != strat_before;
+
+        let delay_before = self.delay_ms;
+        ui.add(egui::Slider::new(&mut self.delay_ms, 5..=100).text("Delay (ms)"));
+        let delay_changed = self.delay_ms != delay_before;
+
+        let hex_before = self.hex_input;
+        ui.checkbox(&mut self.hex_input, "Hex input mode");
+        changed |= self.hex_input != hex_before;
+
+        ui.checkbox(&mut self.save_session, "Auto-save session");
+
+        // If any coordinated setting changed, switch to Custom preset
+        if changed {
+            self.quality_preset = QualityPreset::Custom;
+            self.mark_settings_changed(true);
+        } else if delay_changed {
+            // delay only affects time estimate, not preview
+            self.quality_preset = QualityPreset::Custom;
+            self.mark_settings_changed(false);
         }
     }
 
