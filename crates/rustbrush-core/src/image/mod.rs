@@ -131,6 +131,72 @@ pub fn adjust_saturation(img: &RgbaImage, factor: f32) -> RgbaImage {
     result
 }
 
+/// Apply Gaussian blur to smooth the image. Higher sigma = more blur.
+/// Sigma range: 0.5–5.0.
+pub fn apply_gaussian_blur(img: &RgbaImage, sigma: f32) -> RgbaImage {
+    image::imageops::blur(img, sigma)
+}
+
+/// Reduce each RGB channel to a fixed number of discrete levels.
+/// Levels range: 2–32. Lower = more dramatic simplification.
+pub fn posterize(img: &RgbaImage, levels: u8) -> RgbaImage {
+    let levels = levels.max(2) as f32;
+    let mut result = img.clone();
+    for pixel in result.pixels_mut() {
+        for c in 0..3 {
+            let v = pixel.0[c] as f32 / 255.0;
+            let quantized = (v * (levels - 1.0)).round() / (levels - 1.0);
+            pixel.0[c] = (quantized * 255.0).clamp(0.0, 255.0) as u8;
+        }
+        // Alpha unchanged
+    }
+    result
+}
+
+/// Median filter: replaces each pixel with the median of its neighborhood.
+/// Radius 1 = 3x3 window, radius 2 = 5x5, radius 3 = 7x7.
+/// Preserves edges better than Gaussian blur.
+pub fn median_filter(img: &RgbaImage, radius: u32) -> RgbaImage {
+    let (w, h) = (img.width(), img.height());
+    let mut result = img.clone();
+    let r = radius as i32;
+    let window_size = ((2 * r + 1) * (2 * r + 1)) as usize;
+    let mut buf_r = Vec::with_capacity(window_size);
+    let mut buf_g = Vec::with_capacity(window_size);
+    let mut buf_b = Vec::with_capacity(window_size);
+
+    for y in 0..h {
+        for x in 0..w {
+            buf_r.clear();
+            buf_g.clear();
+            buf_b.clear();
+
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let nx = (x as i32 + dx).clamp(0, w as i32 - 1) as u32;
+                    let ny = (y as i32 + dy).clamp(0, h as i32 - 1) as u32;
+                    let p = img.get_pixel(nx, ny).0;
+                    buf_r.push(p[0]);
+                    buf_g.push(p[1]);
+                    buf_b.push(p[2]);
+                }
+            }
+
+            buf_r.sort_unstable();
+            buf_g.sort_unstable();
+            buf_b.sort_unstable();
+
+            let mid = buf_r.len() / 2;
+            let pixel = result.get_pixel_mut(x, y);
+            pixel.0[0] = buf_r[mid];
+            pixel.0[1] = buf_g[mid];
+            pixel.0[2] = buf_b[mid];
+            // Alpha unchanged
+        }
+    }
+    result
+}
+
 fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
     let ratio_w = max_w as f64 / src_w as f64;
     let ratio_h = max_h as f64 / src_h as f64;
@@ -210,5 +276,41 @@ mod tests {
         assert!(is_gif(std::path::Path::new("test.GIF")));
         assert!(!is_gif(std::path::Path::new("test.png")));
         assert!(!is_gif(std::path::Path::new("test")));
+    }
+
+    #[test]
+    fn test_gaussian_blur_preserves_dimensions() {
+        let img = RgbaImage::from_fn(10, 10, |_, _| image::Rgba([128, 64, 32, 255]));
+        let blurred = apply_gaussian_blur(&img, 1.0);
+        assert_eq!(blurred.width(), 10);
+        assert_eq!(blurred.height(), 10);
+    }
+
+    #[test]
+    fn test_posterize_two_levels() {
+        // With 2 levels, each channel should be either 0 or 255
+        let img = RgbaImage::from_fn(2, 2, |x, _| {
+            if x == 0 {
+                image::Rgba([64, 200, 128, 255])
+            } else {
+                image::Rgba([192, 30, 250, 255])
+            }
+        });
+        let result = posterize(&img, 2);
+        for p in result.pixels() {
+            for c in 0..3 {
+                assert!(p.0[c] == 0 || p.0[c] == 255, "channel {} was {}", c, p.0[c]);
+            }
+            assert_eq!(p.0[3], 255, "alpha should be unchanged");
+        }
+    }
+
+    #[test]
+    fn test_median_filter_uniform_image() {
+        let img = RgbaImage::from_fn(5, 5, |_, _| image::Rgba([100, 150, 200, 255]));
+        let result = median_filter(&img, 1);
+        for p in result.pixels() {
+            assert_eq!(p.0, [100, 150, 200, 255]);
+        }
     }
 }

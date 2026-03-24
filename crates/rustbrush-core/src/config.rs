@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 /// Persistent user configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// Canvas preset index (into all_presets()).
     pub canvas_preset_idx: usize,
@@ -42,6 +43,18 @@ pub struct Config {
     pub saturation: f32,
     /// Quality preset: "speed", "balanced", "quality", "maximum", or "custom".
     pub quality_preset: String,
+    /// Enable Gaussian blur filter.
+    pub blur_enabled: bool,
+    /// Gaussian blur sigma (0.5–5.0).
+    pub blur_sigma: f32,
+    /// Enable posterize filter.
+    pub posterize_enabled: bool,
+    /// Posterize levels per channel (2–32).
+    pub posterize_levels: u8,
+    /// Enable median filter.
+    pub median_enabled: bool,
+    /// Median filter radius (1–3).
+    pub median_radius: u32,
 }
 
 impl Default for Config {
@@ -64,6 +77,12 @@ impl Default for Config {
             contrast: 1.0,
             saturation: 1.0,
             quality_preset: "balanced".to_string(),
+            blur_enabled: false,
+            blur_sigma: 1.0,
+            posterize_enabled: false,
+            posterize_levels: 8,
+            median_enabled: false,
+            median_radius: 1,
         }
     }
 }

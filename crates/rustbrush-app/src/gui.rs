@@ -66,6 +66,14 @@ struct RustBrushApp {
     contrast: f32,
     saturation: f32,
 
+    // Image simplification filters
+    blur_enabled: bool,
+    blur_sigma: f32,
+    posterize_enabled: bool,
+    posterize_levels: u8,
+    median_enabled: bool,
+    median_radius: u32,
+
     // Adaptive palette
     adaptive_palette: bool,
     adaptive_colors: usize,
@@ -272,6 +280,13 @@ impl RustBrushApp {
             contrast: config.contrast,
             saturation: config.saturation,
 
+            blur_enabled: config.blur_enabled,
+            blur_sigma: config.blur_sigma,
+            posterize_enabled: config.posterize_enabled,
+            posterize_levels: config.posterize_levels,
+            median_enabled: config.median_enabled,
+            median_radius: config.median_radius,
+
             adaptive_palette: config.adaptive_palette,
             adaptive_colors: config.adaptive_colors,
 
@@ -362,6 +377,12 @@ impl RustBrushApp {
             brightness: self.brightness,
             contrast: self.contrast,
             saturation: self.saturation,
+            blur_enabled: self.blur_enabled,
+            blur_sigma: self.blur_sigma,
+            posterize_enabled: self.posterize_enabled,
+            posterize_levels: self.posterize_levels,
+            median_enabled: self.median_enabled,
+            median_radius: self.median_radius,
             quality_preset: self.quality_preset.to_config_str().to_string(),
         };
         let _ = config.save_default();
@@ -578,6 +599,12 @@ impl RustBrushApp {
         let brightness = self.brightness;
         let contrast = self.contrast;
         let saturation = self.saturation;
+        let blur_enabled = self.blur_enabled;
+        let blur_sigma = self.blur_sigma;
+        let posterize_enabled = self.posterize_enabled;
+        let posterize_levels = self.posterize_levels;
+        let median_enabled = self.median_enabled;
+        let median_radius = self.median_radius;
         let skip_color_enabled = self.skip_color_enabled;
         let skip_color_hex = self.skip_color_hex.clone();
         let adaptive_palette = self.adaptive_palette;
@@ -604,6 +631,17 @@ impl RustBrushApp {
             }
             if (saturation - 1.0).abs() > 0.01 {
                 resized = rb_image::adjust_saturation(&resized, saturation);
+            }
+
+            // Apply simplification filters (median → blur → posterize)
+            if median_enabled && median_radius > 0 {
+                resized = rb_image::median_filter(&resized, median_radius);
+            }
+            if blur_enabled && blur_sigma > 0.01 {
+                resized = rb_image::apply_gaussian_blur(&resized, blur_sigma);
+            }
+            if posterize_enabled && posterize_levels >= 2 {
+                resized = rb_image::posterize(&resized, posterize_levels);
             }
 
             // Parse skip color
@@ -1228,6 +1266,48 @@ impl RustBrushApp {
 
         ui.separator();
 
+        // --- Simplification Filters ---
+        ui.heading("Simplify");
+        ui.small("Reduce detail for faster painting");
+        let mut filter_changed = false;
+
+        filter_changed |= ui.checkbox(&mut self.median_enabled, "Median filter").changed();
+        if self.median_enabled {
+            filter_changed |= ui
+                .add(egui::Slider::new(&mut self.median_radius, 1..=3).text("Radius"))
+                .changed();
+        }
+
+        filter_changed |= ui.checkbox(&mut self.blur_enabled, "Blur").changed();
+        if self.blur_enabled {
+            filter_changed |= ui
+                .add(egui::Slider::new(&mut self.blur_sigma, 0.5..=5.0).text("Sigma"))
+                .changed();
+        }
+
+        filter_changed |= ui.checkbox(&mut self.posterize_enabled, "Posterize").changed();
+        if self.posterize_enabled {
+            filter_changed |= ui
+                .add(egui::Slider::new(&mut self.posterize_levels, 2..=32u8).text("Levels"))
+                .changed();
+        }
+
+        if ui.button("Reset Filters").clicked() {
+            self.blur_enabled = false;
+            self.blur_sigma = 1.0;
+            self.posterize_enabled = false;
+            self.posterize_levels = 8;
+            self.median_enabled = false;
+            self.median_radius = 1;
+            filter_changed = true;
+        }
+        if filter_changed {
+            self.quality_preset = QualityPreset::Custom;
+            self.mark_settings_changed(true);
+        }
+
+        ui.separator();
+
         // --- Canvas Size ---
         ui.heading("Canvas");
         let mut canvas_changed = false;
@@ -1767,6 +1847,17 @@ impl RustBrushApp {
             }
             if (self.saturation - 1.0).abs() > 0.01 {
                 resized = rb_image::adjust_saturation(&resized, self.saturation);
+            }
+
+            // Apply simplification filters (median → blur → posterize)
+            if self.median_enabled && self.median_radius > 0 {
+                resized = rb_image::median_filter(&resized, self.median_radius);
+            }
+            if self.blur_enabled && self.blur_sigma > 0.01 {
+                resized = rb_image::apply_gaussian_blur(&resized, self.blur_sigma);
+            }
+            if self.posterize_enabled && self.posterize_levels >= 2 {
+                resized = rb_image::posterize(&resized, self.posterize_levels);
             }
 
             let skip_color = if self.skip_color_enabled {
