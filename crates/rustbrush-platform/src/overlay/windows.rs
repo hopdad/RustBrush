@@ -79,7 +79,7 @@ impl WindowsOverlay {
                 GLOBAL_STATE = Some(state_clone);
                 let hwnd = create_overlay_window();
                 let _ = tx.send(hwnd);
-                if hwnd != 0 {
+                if !hwnd.is_null() {
                     run_message_loop();
                 }
                 GLOBAL_STATE = None;
@@ -87,7 +87,7 @@ impl WindowsOverlay {
         });
 
         match rx.recv() {
-            Ok(hwnd) if hwnd != 0 => Some(WindowsOverlay {
+            Ok(hwnd) if !hwnd.is_null() => Some(WindowsOverlay {
                 hwnd,
                 thread_handle: Some(handle),
                 state,
@@ -145,12 +145,12 @@ unsafe fn create_overlay_window() -> HWND {
         cbClsExtra: 0,
         cbWndExtra: 0,
         hInstance: hinstance,
-        hIcon: 0,
-        hCursor: 0,
-        hbrBackground: 0,
+        hIcon: std::ptr::null_mut(),
+        hCursor: std::ptr::null_mut(),
+        hbrBackground: std::ptr::null_mut(),
         lpszMenuName: std::ptr::null(),
         lpszClassName: class_name.as_ptr(),
-        hIconSm: 0,
+        hIconSm: std::ptr::null_mut(),
     };
     RegisterClassExW(&wc);
 
@@ -171,14 +171,14 @@ unsafe fn create_overlay_window() -> HWND {
         vy,
         vw,
         vh,
-        0,
-        0,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
         hinstance,
         std::ptr::null(),
     );
 
-    if hwnd == 0 {
-        return 0;
+    if hwnd.is_null() {
+        return std::ptr::null_mut();
     }
 
     // Color key: magenta pixels become fully transparent.
@@ -194,7 +194,7 @@ unsafe fn create_overlay_window() -> HWND {
 /// Window message loop — runs until WM_CLOSE / WM_DESTROY.
 unsafe fn run_message_loop() {
     let mut msg: MSG = std::mem::zeroed();
-    while GetMessageW(&mut msg, 0, 0, 0) > 0 {
+    while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
         DispatchMessageW(&msg);
     }
 }
