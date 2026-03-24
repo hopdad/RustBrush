@@ -72,6 +72,22 @@ pub fn build_preview(img: &RgbaImage, pixels: &[MappedPixel]) -> RgbaImage {
     preview
 }
 
+/// Create PaletteColors from scanned RGB values (e.g. from screen palette capture).
+pub fn palette_from_rgb(colors: &[(u8, u8, u8)]) -> Vec<PaletteColor> {
+    colors
+        .iter()
+        .map(|&(r, g, b)| {
+            let hex = format!("{:02X}{:02X}{:02X}", r, g, b);
+            PaletteColor {
+                r,
+                g,
+                b,
+                hex: Box::leak(hex.into_boxed_str()),
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn should_skip(r: u8, g: u8, b: u8, opts: &QuantizeOptions) -> bool {
     if let Some((sr, sg, sb)) = opts.skip_color {
         let dr = r as i32 - sr as i32;

@@ -3,19 +3,21 @@
 use eframe::egui;
 use rustbrush_core::canvas;
 use rustbrush_core::color::{
-    build_preview, generate_adaptive_palette, map_image_to_palette, rust_palette,
+    build_preview, generate_adaptive_palette, map_image_to_palette, palette_from_rgb, rust_palette,
     ColorMatchAlgo, DitherMode, MappedPixel, QuantizeOptions,
 };
 use rustbrush_core::config::Config;
 use rustbrush_core::image as rb_image;
 use rustbrush_core::library;
-use rustbrush_core::painting::{self, ColorGroup, PaintPlan, PaintStrategy, ScreenRect};
+use rustbrush_core::painting::{self, ColorGroup, PaintCommand, PaintPlan, PaintStrategy, ScreenRect};
+use rustbrush_platform::capture::{self, PaletteEntry};
 use rustbrush_core::session::Session;
 use rustbrush_core::text::{self, TextAlign, TextConfig};
 use rustbrush_platform::executor::{self, ExecutionResult, ExecutorConfig, ProgressUpdate};
 use rustbrush_platform::hotkey::{PaintControl, region};
 use rustbrush_platform::input::{InputDriver, SafeInput};
 use portable_atomic::Ordering;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
@@ -112,6 +114,10 @@ struct RustBrushApp {
     canvas_region: Option<ScreenRect>,
     hex_field_pos: Option<(i32, i32)>,
     resume_index: usize,
+
+    // Scanned palette state
+    palette_region: Option<ScreenRect>,
+    scanned_palette: Option<Vec<PaletteEntry>>,
 
     // GIF / animation state
     gif_frames: Option<Vec<image::RgbaImage>>,
@@ -253,6 +259,7 @@ enum PaintingPhase {
 enum CalibrationResult {
     CanvasRegion(Result<region::ScreenRegion, String>),
     HexFieldPoint(Result<(i32, i32), String>),
+    PaletteRegion(Result<(region::ScreenRegion, Vec<PaletteEntry>), String>),
 }
 
 /// Result sent back from the background processing thread.
@@ -354,6 +361,9 @@ impl RustBrushApp {
             calibration_rx: None,
             calibrating: false,
             calibration_label: String::new(),
+
+            palette_region: None,
+            scanned_palette: None,
 
             // Path optimizer
             path_optimizer: config.path_optimizer,
@@ -550,14 +560,29 @@ impl RustBrushApp {
             StrategyChoice::Scanline => Box::new(painting::ScanlineStrategy),
         };
 
-        let plan = strategy.plan(
+        // Generate color selection commands when using hex, adaptive, or scanned palette
+        let need_color_selection = self.hex_input || self.adaptive_palette || self.scanned_palette.is_some();
+        let mut plan = strategy.plan(
             groups,
             &canvas,
             self.canvas_width(),
             self.canvas_height(),
-            self.hex_input || self.adaptive_palette,
+            need_color_selection,
             30,
         );
+
+        // When using scanned palette without hex mode, replace hex commands with clicks
+        if self.use_palette_clicks() {
+            if let Some(positions) = self.scanned_click_positions() {
+                for cmd in &mut plan.commands {
+                    if let PaintCommand::SelectColorByHex { ref hex } = cmd {
+                        if let Some(&(x, y)) = positions.get(hex.as_str()) {
+                            *cmd = PaintCommand::SelectColorByClick { x, y };
+                        }
+                    }
+                }
+            }
+        }
 
         let est_time = painting::estimate_time(&plan, self.delay_ms as u64);
         self.status_message = format!(
@@ -629,7 +654,7 @@ impl RustBrushApp {
         } else {
             20 // rough guess for fixed palette usage
         });
-        let use_hex = self.hex_input || self.adaptive_palette;
+        let use_hex = self.hex_input || self.adaptive_palette || self.scanned_palette.is_some();
         self.estimated_time_secs = Some(painting::estimate_time_approx(
             pixels,
             colors,
@@ -665,6 +690,9 @@ impl RustBrushApp {
         let dither = self.dither;
         let alpha_threshold = self.alpha_threshold;
         let generation = self.settings_generation;
+        let scanned_rgb: Option<Vec<(u8, u8, u8)>> = self.scanned_palette.as_ref().map(|entries| {
+            entries.iter().map(|e| (e.r, e.g, e.b)).collect()
+        });
 
         let (tx, rx) = mpsc::channel();
         self.bg_result_rx = Some(rx);
@@ -706,6 +734,8 @@ impl RustBrushApp {
             // Determine palette
             let palette = if adaptive_palette {
                 generate_adaptive_palette(&resized, adaptive_colors)
+            } else if let Some(ref rgb) = scanned_rgb {
+                palette_from_rgb(rgb)
             } else {
                 rust_palette()
             };
@@ -767,7 +797,8 @@ impl RustBrushApp {
         let plan = plan.clone();
         let delay_ms = self.delay_ms;
         let save_session = self.save_session;
-        let hex_input = self.hex_input || self.adaptive_palette;
+        // Only focus hex field when actually typing hex codes (not when using palette clicks)
+        let hex_input = (self.hex_input || self.adaptive_palette) && !self.use_palette_clicks();
 
         // Set up session
         let image_path_str = self.image_path
@@ -865,7 +896,7 @@ impl RustBrushApp {
         self.paint_control = Some(control.clone());
 
         let delay_ms = self.delay_ms;
-        let hex_input = self.hex_input || self.adaptive_palette;
+        let hex_input = (self.hex_input || self.adaptive_palette) && !self.use_palette_clicks();
         let hex_field_pos = self.hex_field_pos;
 
         let image_path_str = self.image_path
@@ -980,6 +1011,53 @@ impl RustBrushApp {
             let _ = tx.send(CalibrationResult::HexFieldPoint(result));
         });
     }
+
+    /// Start interactive palette region capture on a background thread.
+    fn start_palette_capture(&mut self) {
+        if self.calibrating {
+            return;
+        }
+        self.calibrating = true;
+        self.calibration_label = "Palette".to_string();
+        self.status_message = "Press F7, then click and drag over the in-game color palette. ESC to cancel.".to_string();
+
+        let (tx, rx) = mpsc::channel();
+        self.calibration_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let region_result = region::capture_region_interactive("Palette", device_query::Keycode::F7);
+            let result = match region_result {
+                Ok(r) => {
+                    match capture::sample_palette_colors(r.x, r.y, r.width, r.height) {
+                        Ok(entries) => Ok((r, entries)),
+                        Err(e) => Err(e),
+                    }
+                }
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(CalibrationResult::PaletteRegion(result));
+        });
+    }
+
+    /// Build a hex→click position map from the scanned palette.
+    fn scanned_click_positions(&self) -> Option<HashMap<String, (i32, i32)>> {
+        self.scanned_palette.as_ref().map(|entries| {
+            entries
+                .iter()
+                .map(|e| {
+                    (
+                        format!("{:02X}{:02X}{:02X}", e.r, e.g, e.b),
+                        (e.screen_x, e.screen_y),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// Whether the plan should use click-based color selection (scanned palette without hex override).
+    fn use_palette_clicks(&self) -> bool {
+        self.scanned_palette.is_some() && !self.hex_input && !self.adaptive_palette
+    }
 }
 
 impl eframe::App for RustBrushApp {
@@ -1043,6 +1121,24 @@ impl eframe::App for RustBrushApp {
                     }
                     CalibrationResult::HexFieldPoint(Err(e)) => {
                         self.status_message = format!("Hex field capture cancelled: {}", e);
+                    }
+                    CalibrationResult::PaletteRegion(Ok((r, entries))) => {
+                        let count = entries.len();
+                        self.palette_region = Some(ScreenRect {
+                            x: r.x, y: r.y, width: r.width, height: r.height,
+                        });
+                        self.scanned_palette = Some(entries);
+                        self.status_message = format!(
+                            "Palette scanned: {} colors found", count
+                        );
+                        // Trigger reprocess with scanned palette
+                        if self.source_image.is_some() {
+                            self.pending_reprocess = true;
+                            self.last_settings_change = Instant::now();
+                        }
+                    }
+                    CalibrationResult::PaletteRegion(Err(e)) => {
+                        self.status_message = format!("Palette capture cancelled: {}", e);
                     }
                 }
             }
@@ -1505,7 +1601,29 @@ impl RustBrushApp {
                     ));
                 }
 
-                // Hex field point capture
+                // Palette region scan
+                ui.horizontal(|ui| {
+                    if ui.button("Scan Palette (F7)")
+                        .on_hover_text("Press F7, then click and drag over the in-game color palette swatches")
+                        .clicked()
+                    {
+                        self.start_palette_capture();
+                    }
+                    if let Some(ref entries) = self.scanned_palette {
+                        ui.label(format!("{} colors", entries.len()));
+                    }
+                });
+
+                if let Some(ref region) = self.palette_region {
+                    ui.small(format!(
+                        "  {}x{} at ({}, {})", region.width, region.height, region.x, region.y
+                    ));
+                }
+                if self.scanned_palette.is_some() && !self.hex_input && !self.adaptive_palette {
+                    ui.small("  Colors will be selected by clicking the palette");
+                }
+
+                // Hex field point capture (needed for hex input or adaptive palette modes)
                 if self.hex_input || self.adaptive_palette {
                     ui.horizontal(|ui| {
                         if ui.button("Select Hex Field (F8)")
@@ -1941,6 +2059,9 @@ impl RustBrushApp {
 
             let palette = if self.adaptive_palette {
                 generate_adaptive_palette(&resized, self.adaptive_colors)
+            } else if let Some(ref entries) = self.scanned_palette {
+                let rgb: Vec<(u8, u8, u8)> = entries.iter().map(|e| (e.r, e.g, e.b)).collect();
+                palette_from_rgb(&rgb)
             } else {
                 rust_palette()
             };
@@ -1977,7 +2098,12 @@ impl RustBrushApp {
             height: self.canvas_height(),
         };
 
-        let use_hex = self.hex_input || self.adaptive_palette;
+        let need_color_selection = self.hex_input || self.adaptive_palette || self.scanned_palette.is_some();
+        let click_positions = if self.use_palette_clicks() {
+            self.scanned_click_positions()
+        } else {
+            None
+        };
         let mut total_commands = 0usize;
 
         for slot in 0..self.selected_frame_indices.len() {
@@ -1993,11 +2119,22 @@ impl RustBrushApp {
                 StrategyChoice::Scanline => Box::new(painting::ScanlineStrategy),
             };
 
-            let plan = strategy.plan(
+            let mut plan = strategy.plan(
                 groups, &canvas,
                 self.canvas_width(), self.canvas_height(),
-                use_hex, 30,
+                need_color_selection, 30,
             );
+
+            // Replace hex commands with clicks when using scanned palette
+            if let Some(ref positions) = click_positions {
+                for cmd in &mut plan.commands {
+                    if let PaintCommand::SelectColorByHex { ref hex } = cmd {
+                        if let Some(&(x, y)) = positions.get(hex.as_str()) {
+                            *cmd = PaintCommand::SelectColorByClick { x, y };
+                        }
+                    }
+                }
+            }
 
             total_commands += plan.metadata.total_commands;
             self.frame_plans[slot] = Some(plan);
