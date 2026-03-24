@@ -70,6 +70,15 @@ struct RustBrushApp {
     contrast: f32,
     saturation: f32,
 
+    // Crop margins (percentage, 0–50%)
+    crop_top: f32,
+    crop_bottom: f32,
+    crop_left: f32,
+    crop_right: f32,
+
+    // Preview mode
+    preview_mode: PreviewMode,
+
     // Image simplification filters
     blur_enabled: bool,
     blur_sigma: f32,
@@ -196,6 +205,13 @@ impl StrategyChoice {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewMode {
+    SideBySide,
+    OriginalOnly,
+    PreviewOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QualityPreset {
     Speed,
     Balanced,
@@ -217,10 +233,10 @@ impl QualityPreset {
 
     fn description(&self) -> &str {
         match self {
-            Self::Speed => "Hybrid + RGB + No dither",
-            Self::Balanced => "Hybrid + RGB + Ordered dither",
-            Self::Quality => "Grouped + CIEDE2000 + F-S dither + Adaptive 128",
-            Self::Maximum => "Scanline + CIEDE2000 + F-S dither + Adaptive 512",
+            Self::Speed => "Hybrid + RGB + No dither (32 colors)",
+            Self::Balanced => "Hybrid + RGB + Ordered dither (32 colors)",
+            Self::Quality => "Grouped + CIEDE2000 + F-S dither (128 colors)",
+            Self::Maximum => "Scanline + CIEDE2000 + F-S dither (512 colors)",
             Self::Custom => "Custom settings",
         }
     }
@@ -309,6 +325,13 @@ impl RustBrushApp {
             brightness: config.brightness,
             contrast: config.contrast,
             saturation: config.saturation,
+
+            crop_top: 0.0,
+            crop_bottom: 0.0,
+            crop_left: 0.0,
+            crop_right: 0.0,
+
+            preview_mode: PreviewMode::SideBySide,
 
             blur_enabled: config.blur_enabled,
             blur_sigma: config.blur_sigma,
@@ -673,6 +696,10 @@ impl RustBrushApp {
         let source = source.clone();
         let w = self.canvas_width();
         let h = self.canvas_height();
+        let crop_top = self.crop_top;
+        let crop_bottom = self.crop_bottom;
+        let crop_left = self.crop_left;
+        let crop_right = self.crop_right;
         let brightness = self.brightness;
         let contrast = self.contrast;
         let saturation = self.saturation;
@@ -699,8 +726,15 @@ impl RustBrushApp {
         self.processing = true;
 
         std::thread::spawn(move || {
+            // Crop (before resize)
+            let cropped = if crop_top > 0.01 || crop_bottom > 0.01 || crop_left > 0.01 || crop_right > 0.01 {
+                rb_image::crop_margins(&source, crop_top, crop_bottom, crop_left, crop_right)
+            } else {
+                source
+            };
+
             // Resize
-            let mut resized = rb_image::resize(&source, w, h, rb_image::AspectRatio::Stretch);
+            let mut resized = rb_image::resize(&cropped, w, h, rb_image::AspectRatio::Stretch);
 
             // Apply adjustments
             if (brightness - 1.0).abs() > 0.01 {
@@ -1058,6 +1092,30 @@ impl RustBrushApp {
     fn use_palette_clicks(&self) -> bool {
         self.scanned_palette.is_some() && !self.hex_input && !self.adaptive_palette
     }
+
+    /// Re-sample colors from the previously captured palette region.
+    fn rescan_palette(&mut self) {
+        let Some(region) = self.palette_region else { return };
+        match capture::sample_palette_colors(region.x, region.y, region.width, region.height) {
+            Ok(entries) => {
+                let count = entries.len();
+                self.scanned_palette = Some(entries);
+                self.status_message = format!("Palette rescanned: {} colors found", count);
+                if self.source_image.is_some() {
+                    self.pending_reprocess = true;
+                    self.last_settings_change = Instant::now();
+                }
+            }
+            Err(e) => {
+                self.status_message = format!("Rescan failed: {}", e);
+            }
+        }
+    }
+
+    /// Whether crop margins are active.
+    fn has_crop(&self) -> bool {
+        self.crop_top > 0.01 || self.crop_bottom > 0.01 || self.crop_left > 0.01 || self.crop_right > 0.01
+    }
 }
 
 impl eframe::App for RustBrushApp {
@@ -1408,6 +1466,65 @@ impl RustBrushApp {
 
         ui.separator();
 
+        // --- Image Transforms ---
+        ui.heading("Transform");
+        let has_image = self.source_image.is_some();
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(has_image, |ui| {
+                if ui.button("Rotate CW").on_hover_text("Rotate 90\u{00b0} clockwise").clicked() {
+                    if let Some(ref img) = self.source_image {
+                        self.source_image = Some(rb_image::rotate_90(img));
+                        self.source_texture = None;
+                        self.mark_settings_changed(true);
+                    }
+                }
+                if ui.button("Rotate CCW").on_hover_text("Rotate 90\u{00b0} counter-clockwise").clicked() {
+                    if let Some(ref img) = self.source_image {
+                        self.source_image = Some(rb_image::rotate_270(img));
+                        self.source_texture = None;
+                        self.mark_settings_changed(true);
+                    }
+                }
+                if ui.button("Flip H").on_hover_text("Mirror horizontally").clicked() {
+                    if let Some(ref img) = self.source_image {
+                        self.source_image = Some(rb_image::flip_horizontal(img));
+                        self.source_texture = None;
+                        self.mark_settings_changed(true);
+                    }
+                }
+                if ui.button("Flip V").on_hover_text("Flip vertically").clicked() {
+                    if let Some(ref img) = self.source_image {
+                        self.source_image = Some(rb_image::flip_vertical(img));
+                        self.source_texture = None;
+                        self.mark_settings_changed(true);
+                    }
+                }
+            });
+        });
+
+        // --- Crop Margins ---
+        let mut crop_changed = false;
+        egui::CollapsingHeader::new("Crop")
+            .default_open(self.has_crop())
+            .show(ui, |ui| {
+                crop_changed |= ui.add(egui::Slider::new(&mut self.crop_top, 0.0..=45.0).text("Top %")).changed();
+                crop_changed |= ui.add(egui::Slider::new(&mut self.crop_bottom, 0.0..=45.0).text("Bottom %")).changed();
+                crop_changed |= ui.add(egui::Slider::new(&mut self.crop_left, 0.0..=45.0).text("Left %")).changed();
+                crop_changed |= ui.add(egui::Slider::new(&mut self.crop_right, 0.0..=45.0).text("Right %")).changed();
+                if self.has_crop() && ui.button("Reset Crop").clicked() {
+                    self.crop_top = 0.0;
+                    self.crop_bottom = 0.0;
+                    self.crop_left = 0.0;
+                    self.crop_right = 0.0;
+                    crop_changed = true;
+                }
+            });
+        if crop_changed {
+            self.mark_settings_changed(true);
+        }
+
+        ui.separator();
+
         // --- Image Adjustments ---
         ui.heading("Adjustments");
         let mut adj_changed = false;
@@ -1608,6 +1725,14 @@ impl RustBrushApp {
                         .clicked()
                     {
                         self.start_palette_capture();
+                    }
+                    if self.palette_region.is_some() && self.scanned_palette.is_some() {
+                        if ui.button("Rescan")
+                            .on_hover_text("Re-sample colors from the same palette region")
+                            .clicked()
+                        {
+                            self.rescan_palette();
+                        }
                     }
                     if let Some(ref entries) = self.scanned_palette {
                         ui.label(format!("{} colors", entries.len()));
@@ -2028,7 +2153,12 @@ impl RustBrushApp {
             // Process this frame synchronously (could be optimized to background later)
             let w = self.canvas_width();
             let h = self.canvas_height();
-            let mut resized = rb_image::resize(frame, w, h, rb_image::AspectRatio::Stretch);
+            let cropped = if self.has_crop() {
+                rb_image::crop_margins(frame, self.crop_top, self.crop_bottom, self.crop_left, self.crop_right)
+            } else {
+                frame.clone()
+            };
+            let mut resized = rb_image::resize(&cropped, w, h, rb_image::AspectRatio::Stretch);
 
             if (self.brightness - 1.0).abs() > 0.01 {
                 resized = rb_image::adjust_brightness(&resized, self.brightness);
@@ -2329,34 +2459,77 @@ impl RustBrushApp {
 
         let has_preview = self.preview_texture.is_some();
 
+        // Preview mode toggle + palette strip
         ui.horizontal(|ui| {
-            ui.heading("Source");
             if has_preview {
-                ui.separator();
-                ui.heading("Preview (quantized)");
+                if ui.selectable_label(self.preview_mode == PreviewMode::SideBySide, "Side by Side").clicked() {
+                    self.preview_mode = PreviewMode::SideBySide;
+                }
+                if ui.selectable_label(self.preview_mode == PreviewMode::OriginalOnly, "Original").clicked() {
+                    self.preview_mode = PreviewMode::OriginalOnly;
+                }
+                if ui.selectable_label(self.preview_mode == PreviewMode::PreviewOnly, "Preview").clicked() {
+                    self.preview_mode = PreviewMode::PreviewOnly;
+                }
+            } else {
+                ui.heading("Source");
             }
         });
+
+        // Palette color strip — show color distribution
+        if let Some(ref groups) = self.paint_groups {
+            let total_px: usize = groups.iter().map(|g| g.pixels.len()).sum();
+            if total_px > 0 {
+                let strip_height = 14.0;
+                let strip_width = ui.available_width().min(800.0);
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(strip_width, strip_height),
+                    egui::Sense::hover(),
+                );
+                let painter = ui.painter_at(rect);
+                let mut x = rect.left();
+                for group in groups.iter() {
+                    let frac = group.pixels.len() as f32 / total_px as f32;
+                    let w = (frac * strip_width).max(1.0);
+                    let (r, g, b) = group.color;
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(w, strip_height)),
+                        0.0,
+                        egui::Color32::from_rgb(r, g, b),
+                    );
+                    x += w;
+                }
+                ui.small(format!("{} colors, {} pixels", groups.len(), total_px));
+            }
+        }
 
         ui.separator();
 
         let available = ui.available_size();
-        let half_width = if has_preview {
+        let show_source = !has_preview || self.preview_mode != PreviewMode::PreviewOnly;
+        let show_preview = has_preview && self.preview_mode != PreviewMode::OriginalOnly;
+        let both = show_source && show_preview;
+        let img_width = if both {
             (available.x - 10.0) / 2.0
         } else {
             available.x
         };
 
         ui.horizontal(|ui| {
-            if let Some(ref tex) = self.source_texture {
-                let size = fit_image_size(tex.size_vec2(), half_width, available.y - 30.0);
-                ui.image(egui::load::SizedTexture::new(tex.id(), size));
+            if show_source {
+                if let Some(ref tex) = self.source_texture {
+                    let size = fit_image_size(tex.size_vec2(), img_width, available.y - 30.0);
+                    ui.image(egui::load::SizedTexture::new(tex.id(), size));
+                }
             }
 
-            if has_preview {
+            if both {
                 ui.separator();
+            }
 
+            if show_preview {
                 if let Some(ref tex) = self.preview_texture {
-                    let size = fit_image_size(tex.size_vec2(), half_width, available.y - 30.0);
+                    let size = fit_image_size(tex.size_vec2(), img_width, available.y - 30.0);
                     ui.image(egui::load::SizedTexture::new(tex.id(), size));
                 }
             }

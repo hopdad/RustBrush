@@ -197,6 +197,44 @@ pub fn median_filter(img: &RgbaImage, radius: u32) -> RgbaImage {
     result
 }
 
+/// Rotate image 90 degrees clockwise.
+pub fn rotate_90(img: &RgbaImage) -> RgbaImage {
+    image::imageops::rotate90(img)
+}
+
+/// Rotate image 180 degrees.
+pub fn rotate_180(img: &RgbaImage) -> RgbaImage {
+    image::imageops::rotate180(img)
+}
+
+/// Rotate image 90 degrees counter-clockwise.
+pub fn rotate_270(img: &RgbaImage) -> RgbaImage {
+    image::imageops::rotate270(img)
+}
+
+/// Flip image horizontally (mirror).
+pub fn flip_horizontal(img: &RgbaImage) -> RgbaImage {
+    image::imageops::flip_horizontal(img)
+}
+
+/// Flip image vertically.
+pub fn flip_vertical(img: &RgbaImage) -> RgbaImage {
+    image::imageops::flip_vertical(img)
+}
+
+/// Crop image by percentage margins (0.0–50.0 for each side).
+pub fn crop_margins(img: &RgbaImage, top: f32, bottom: f32, left: f32, right: f32) -> RgbaImage {
+    let w = img.width() as f32;
+    let h = img.height() as f32;
+    let x = (w * left / 100.0).round() as u32;
+    let y = (h * top / 100.0).round() as u32;
+    let x2 = (w * (1.0 - right / 100.0)).round() as u32;
+    let y2 = (h * (1.0 - bottom / 100.0)).round() as u32;
+    let cw = x2.saturating_sub(x).max(1);
+    let ch = y2.saturating_sub(y).max(1);
+    image::imageops::crop_imm(img, x, y, cw, ch).to_image()
+}
+
 fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
     let ratio_w = max_w as f64 / src_w as f64;
     let ratio_h = max_h as f64 / src_h as f64;
