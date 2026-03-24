@@ -10,3 +10,5 @@ pub mod library;
 pub mod painting;
 pub mod session;
 pub mod text;
+#[cfg(feature = "update-check")]
+pub mod update;

@@ -165,7 +165,21 @@ fn parse_hex_color(s: &str) -> Result<(u8, u8, u8), String> {
 
 fn main() {
     env_logger::init();
+
+    // Kick off background update check (non-blocking)
+    #[cfg(feature = "update-check")]
+    let update_rx = rustbrush_core::update::check_for_update();
+
     let mut cli = Cli::parse();
+
+    // Show update notice if the check completed in time
+    #[cfg(feature = "update-check")]
+    if let Ok(info) = update_rx.try_recv() {
+        eprintln!(
+            "  Update available: v{} (you have v{}). Download: {}",
+            info.latest_version, info.current_version, info.release_url
+        );
+    }
 
     // Handle session resume
     if let Some(ref resume_path) = cli.resume {

@@ -5,6 +5,10 @@ edition = "2021"
 description = "An automatic sign painter for Rust (the game)"
 license = "MIT"
 
+[features]
+default = ["update-check"]
+update-check = ["rustbrush-core/update-check"]
+
 [[bin]]
 name = "rustbrush"
 path = "src/main.rs"

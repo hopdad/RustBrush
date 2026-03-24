@@ -165,6 +165,12 @@ struct RustBrushApp {
     show_library: bool,
     library_category_idx: usize,
     library_thumbnails: Vec<Option<egui::TextureHandle>>,
+
+    // Update check
+    #[cfg(feature = "update-check")]
+    update_rx: Option<mpsc::Receiver<rustbrush_core::update::UpdateInfo>>,
+    #[cfg(feature = "update-check")]
+    update_available: Option<rustbrush_core::update::UpdateInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,6 +414,12 @@ impl RustBrushApp {
             show_library: false,
             library_category_idx: 0,
             library_thumbnails: vec![None; library::all_items().len()],
+
+            // Update check
+            #[cfg(feature = "update-check")]
+            update_rx: Some(rustbrush_core::update::check_for_update()),
+            #[cfg(feature = "update-check")]
+            update_available: None,
         }
     }
 
@@ -1202,6 +1214,15 @@ impl eframe::App for RustBrushApp {
             }
         }
 
+        // Poll update check
+        #[cfg(feature = "update-check")]
+        if let Some(ref rx) = self.update_rx {
+            if let Ok(info) = rx.try_recv() {
+                self.update_available = Some(info);
+                self.update_rx = None;
+            }
+        }
+
         // Keep polling while calibrating
         if self.calibrating {
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -1370,6 +1391,26 @@ impl eframe::App for RustBrushApp {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&self.status_message);
+
+                #[cfg(feature = "update-check")]
+                {
+                    let mut dismiss = false;
+                    if let Some(ref info) = self.update_available {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("x").clicked() {
+                                dismiss = true;
+                            }
+                            ui.hyperlink_to("Download", &info.release_url);
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                format!("v{} available!", info.latest_version),
+                            );
+                        });
+                    }
+                    if dismiss {
+                        self.update_available = None;
+                    }
+                }
             });
         });
 
