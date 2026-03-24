@@ -70,6 +70,7 @@ impl PaintStrategy for ScanlineStrategy {
                 total_colors: unique_colors.len(),
                 total_commands: commands.len(),
                 strategy_name: self.name().to_string(),
+                optimization_improvement: None,
             },
             commands,
         }
@@ -123,6 +124,7 @@ impl PaintStrategy for ColorGroupedStrategy {
                 total_colors: groups.len(),
                 total_commands: commands.len(),
                 strategy_name: self.name().to_string(),
+                optimization_improvement: None,
             },
             commands,
         }
@@ -180,6 +182,7 @@ impl PaintStrategy for LineDrawStrategy {
                 total_colors: groups.len(),
                 total_commands: commands.len(),
                 strategy_name: self.name().to_string(),
+                optimization_improvement: None,
             },
             commands,
         }
@@ -192,11 +195,16 @@ impl PaintStrategy for LineDrawStrategy {
 pub struct HybridStrategy {
     /// Minimum run length to use line drawing (default: 3)
     pub min_run_length: u32,
+    /// Enable 2-opt path optimization (default: true)
+    pub optimize: bool,
 }
 
 impl Default for HybridStrategy {
     fn default() -> Self {
-        Self { min_run_length: 3 }
+        Self {
+            min_run_length: 3,
+            optimize: true,
+        }
     }
 }
 
@@ -216,6 +224,8 @@ impl PaintStrategy for HybridStrategy {
     ) -> PaintPlan {
         let total_pixels: usize = groups.iter().map(|g| g.pixels.len()).sum();
         let mut commands = Vec::new();
+        let mut total_improvement = 0.0f64;
+        let mut total_original = 0.0f64;
 
         for group in groups {
             if group.pixels.is_empty() {
@@ -230,10 +240,24 @@ impl PaintStrategy for HybridStrategy {
             let segments = detect_line_segments(&group.pixels, self.min_run_length);
 
             // Order segments by nearest-neighbor on their start points
-            let ordered = nearest_neighbor_order_segments(&segments);
+            let mut ordered = nearest_neighbor_order_segments(&segments);
+
+            // Optionally apply 2-opt local search to reduce travel distance
+            if self.optimize && ordered.len() > 2 {
+                let max_iter = if ordered.len() > 1000 { 3 } else { 0 };
+                let result = super::optimizer::optimize_2opt(&mut ordered, max_iter);
+                total_improvement += result.original_distance - result.optimized_distance;
+                total_original += result.original_distance;
+            }
 
             emit_segments(&ordered, canvas, img_width, img_height, &mut commands);
         }
+
+        let optimization_improvement = if self.optimize && total_original > 0.0 {
+            Some((total_improvement / total_original) * 100.0)
+        } else {
+            None
+        };
 
         PaintPlan {
             metadata: PlanMetadata {
@@ -241,6 +265,7 @@ impl PaintStrategy for HybridStrategy {
                 total_colors: groups.len(),
                 total_commands: commands.len(),
                 strategy_name: self.name().to_string(),
+                optimization_improvement,
             },
             commands,
         }
@@ -249,7 +274,7 @@ impl PaintStrategy for HybridStrategy {
 
 /// A paint segment - either a single pixel or a horizontal line run.
 #[derive(Debug, Clone)]
-enum PaintSegment {
+pub(crate) enum PaintSegment {
     /// Single pixel at (x, y).
     Pixel(u32, u32),
     /// Horizontal line from (x_start, y) to (x_end, y) inclusive.
@@ -257,10 +282,17 @@ enum PaintSegment {
 }
 
 impl PaintSegment {
-    fn start_point(&self) -> (u32, u32) {
+    pub(crate) fn start_point(&self) -> (u32, u32) {
         match self {
             PaintSegment::Pixel(x, y) => (*x, *y),
             PaintSegment::HLine { y, x_start, .. } => (*x_start, *y),
+        }
+    }
+
+    pub(crate) fn end_point(&self) -> (u32, u32) {
+        match self {
+            PaintSegment::Pixel(x, y) => (*x, *y),
+            PaintSegment::HLine { y, x_end, .. } => (*x_end, *y),
         }
     }
 

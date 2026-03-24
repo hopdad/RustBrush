@@ -273,6 +273,7 @@ mod tests {
                 total_colors: 1,
                 total_commands: 8,
                 strategy_name: "test".to_string(),
+                optimization_improvement: None,
             },
         }
     }

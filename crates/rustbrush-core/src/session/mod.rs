@@ -120,6 +120,7 @@ mod tests {
                     total_colors: 1,
                     total_commands: 4,
                     strategy_name: "test".to_string(),
+                    optimization_improvement: None,
                 },
             },
             ScreenRect { x: 0, y: 0, width: 100, height: 100 },

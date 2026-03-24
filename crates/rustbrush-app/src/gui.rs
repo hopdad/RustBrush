@@ -130,6 +130,9 @@ struct RustBrushApp {
     calibrating: bool,
     calibration_label: String,
 
+    // Path optimizer
+    path_optimizer: bool,
+
     // Text builder state
     show_text_builder: bool,
     text_input: String,
@@ -352,6 +355,9 @@ impl RustBrushApp {
             calibrating: false,
             calibration_label: String::new(),
 
+            // Path optimizer
+            path_optimizer: config.path_optimizer,
+
             // Text builder
             show_text_builder: false,
             text_input: "Hello\nWorld".to_string(),
@@ -421,6 +427,7 @@ impl RustBrushApp {
             posterize_levels: self.posterize_levels,
             median_enabled: self.median_enabled,
             median_radius: self.median_radius,
+            path_optimizer: self.path_optimizer,
             quality_preset: self.quality_preset.to_config_str().to_string(),
         };
         let _ = config.save_default();
@@ -534,7 +541,10 @@ impl RustBrushApp {
         };
 
         let strategy: Box<dyn PaintStrategy> = match self.strategy {
-            StrategyChoice::Hybrid => Box::new(painting::HybridStrategy::default()),
+            StrategyChoice::Hybrid => Box::new(painting::HybridStrategy {
+                optimize: self.path_optimizer,
+                ..Default::default()
+            }),
             StrategyChoice::ColorGrouped => Box::new(painting::ColorGroupedStrategy),
             StrategyChoice::LineDraw => Box::new(painting::LineDrawStrategy::default()),
             StrategyChoice::Scanline => Box::new(painting::ScanlineStrategy),
@@ -566,6 +576,7 @@ impl RustBrushApp {
                 self.color_match = ColorMatchAlgo::Rgb;
                 self.delay_ms = 5;
                 self.adaptive_palette = false;
+                self.path_optimizer = true;
             }
             QualityPreset::Balanced => {
                 self.strategy = StrategyChoice::Hybrid;
@@ -573,6 +584,7 @@ impl RustBrushApp {
                 self.color_match = ColorMatchAlgo::Rgb;
                 self.delay_ms = 10;
                 self.adaptive_palette = false;
+                self.path_optimizer = true;
             }
             QualityPreset::Quality => {
                 self.strategy = StrategyChoice::ColorGrouped;
@@ -581,6 +593,7 @@ impl RustBrushApp {
                 self.delay_ms = 15;
                 self.adaptive_palette = true;
                 self.adaptive_colors = 128;
+                self.path_optimizer = true;
             }
             QualityPreset::Maximum => {
                 self.strategy = StrategyChoice::Scanline;
@@ -589,6 +602,7 @@ impl RustBrushApp {
                 self.delay_ms = 30;
                 self.adaptive_palette = true;
                 self.adaptive_colors = 512;
+                self.path_optimizer = true;
             }
             QualityPreset::Custom => {}
         }
@@ -1457,6 +1471,9 @@ impl RustBrushApp {
                 "Est. time: {:.0}s",
                 painting::estimate_time(plan, self.delay_ms as u64)
             ));
+            if let Some(pct) = plan.metadata.optimization_improvement {
+                ui.label(format!("Path optimized: {:.0}% less travel", pct));
+            }
         }
 
         // --- Calibration & Paint Setup ---
@@ -1967,7 +1984,10 @@ impl RustBrushApp {
             let Some(ref groups) = self.frame_groups[slot] else { continue };
 
             let strategy: Box<dyn PaintStrategy> = match self.strategy {
-                StrategyChoice::Hybrid => Box::new(painting::HybridStrategy::default()),
+                StrategyChoice::Hybrid => Box::new(painting::HybridStrategy {
+                    optimize: self.path_optimizer,
+                    ..Default::default()
+                }),
                 StrategyChoice::ColorGrouped => Box::new(painting::ColorGroupedStrategy),
                 StrategyChoice::LineDraw => Box::new(painting::LineDrawStrategy::default()),
                 StrategyChoice::Scanline => Box::new(painting::ScanlineStrategy),
@@ -2086,6 +2106,11 @@ impl RustBrushApp {
                 }
             });
         changed |= self.strategy != strat_before;
+
+        let opt_before = self.path_optimizer;
+        ui.checkbox(&mut self.path_optimizer, "Path optimizer (2-opt)")
+            .on_hover_text("Optimize segment order to minimize mouse travel distance");
+        changed |= self.path_optimizer != opt_before;
 
         let delay_before = self.delay_ms;
         ui.add(egui::Slider::new(&mut self.delay_ms, 5..=100).text("Delay (ms)"));

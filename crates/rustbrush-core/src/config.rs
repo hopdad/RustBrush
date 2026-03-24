@@ -55,6 +55,8 @@ pub struct Config {
     pub median_enabled: bool,
     /// Median filter radius (1–3).
     pub median_radius: u32,
+    /// Enable 2-opt path optimization for segment ordering.
+    pub path_optimizer: bool,
 }
 
 impl Default for Config {
@@ -83,6 +85,7 @@ impl Default for Config {
             posterize_levels: 8,
             median_enabled: false,
             median_radius: 1,
+            path_optimizer: true,
         }
     }
 }

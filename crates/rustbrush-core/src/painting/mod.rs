@@ -5,9 +5,11 @@
 
 mod strategy;
 mod delay;
+pub(crate) mod optimizer;
 
 pub use strategy::{PaintStrategy, ScanlineStrategy, ColorGroupedStrategy, LineDrawStrategy, HybridStrategy};
 pub use delay::AdaptiveDelay;
+pub use optimizer::OptimizeResult;
 
 use crate::color::MappedPixel;
 use serde::{Deserialize, Serialize};
@@ -37,6 +39,8 @@ pub struct PlanMetadata {
     pub total_colors: usize,
     pub total_commands: usize,
     pub strategy_name: String,
+    /// Percentage improvement from path optimization, if optimizer was run.
+    pub optimization_improvement: Option<f64>,
 }
 
 /// A complete, executable painting plan.
