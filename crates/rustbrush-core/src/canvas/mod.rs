@@ -36,7 +36,10 @@ pub const TALL_FRAME: CanvasPreset = CanvasPreset::new("Tall Picture Frame", 128
 pub const XL_FRAME: CanvasPreset = CanvasPreset::new("XL Picture Frame", 512, 512);
 pub const XXL_FRAME: CanvasPreset = CanvasPreset::new("XXL Picture Frame", 1024, 512);
 pub const SPINNING_WHEEL: CanvasPreset = CanvasPreset::new("Spinning Wheel", 256, 256);
+pub const SMALL_NEON_SIGN: CanvasPreset = CanvasPreset::new("Small Neon Sign", 128, 128);
 pub const NEON_SIGN: CanvasPreset = CanvasPreset::new("Neon Sign", 256, 128);
+pub const LARGE_NEON_SIGN: CanvasPreset = CanvasPreset::new("Large Neon Sign", 256, 256);
+pub const LARGE_ANIMATED_NEON_SIGN: CanvasPreset = CanvasPreset::new("Large Animated Neon Sign", 256, 256);
 pub const PHOTO_FRAME: CanvasPreset = CanvasPreset::new("Photo Frame", 320, 240);
 
 /// All available canvas presets.
@@ -55,7 +58,10 @@ pub fn all_presets() -> Vec<CanvasPreset> {
         XL_FRAME,
         XXL_FRAME,
         SPINNING_WHEEL,
+        SMALL_NEON_SIGN,
         NEON_SIGN,
+        LARGE_NEON_SIGN,
+        LARGE_ANIMATED_NEON_SIGN,
         PHOTO_FRAME,
     ]
 }
