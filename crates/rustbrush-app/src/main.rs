@@ -383,6 +383,7 @@ fn main() {
         session_path: session_path.clone(),
         progress_interval: 500,
         progress_tx: None,
+        drift_tolerance: 5,
     };
 
     let result = executor::execute_plan(
@@ -468,6 +469,7 @@ fn resume_session(resume_path: &PathBuf, cli: &Cli) {
         session_path: Some(resume_path.clone()),
         progress_interval: 500,
         progress_tx: None,
+        drift_tolerance: 5,
     };
 
     let result = executor::execute_plan(

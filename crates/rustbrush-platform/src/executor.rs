@@ -5,6 +5,7 @@
 
 use crate::hotkey::PaintControl;
 use crate::input::InputDriver;
+use device_query::{DeviceQuery, DeviceState};
 use rustbrush_core::painting::{PaintCommand, PaintPlan};
 use rustbrush_core::session::Session;
 use std::sync::mpsc;
@@ -18,6 +19,8 @@ pub struct ProgressUpdate {
     pub percent: f64,
     pub current_color: Option<String>,
     pub paused: bool,
+    /// True if mouse drift was detected (physical mouse moved during painting).
+    pub mouse_drift: bool,
 }
 
 /// Result of plan execution.
@@ -45,6 +48,9 @@ pub struct ExecutorConfig {
     pub progress_interval: usize,
     /// Optional channel to send progress updates to the GUI.
     pub progress_tx: Option<mpsc::Sender<ProgressUpdate>>,
+    /// Mouse drift detection: max allowed pixel distance between expected and
+    /// actual mouse position after a MoveTo. 0 = disabled. Auto-pauses on drift.
+    pub drift_tolerance: u32,
 }
 
 impl Default for ExecutorConfig {
@@ -54,6 +60,7 @@ impl Default for ExecutorConfig {
             session_path: None,
             progress_interval: 500,
             progress_tx: None,
+            drift_tolerance: 0,
         }
     }
 }
@@ -72,6 +79,14 @@ pub fn execute_plan(
     let total = plan.commands.len();
     let mut executed = 0usize;
     let mut current_color: Option<String> = None;
+    let mut last_move_target: Option<(i32, i32)> = None;
+
+    // Only create DeviceState if drift detection is enabled
+    let device_state = if config.drift_tolerance > 0 {
+        Some(DeviceState::new())
+    } else {
+        None
+    };
 
     for i in start_index..total {
         // Check pause/cancel
@@ -85,6 +100,7 @@ pub fn execute_plan(
                     percent: executed as f64 / total as f64 * 100.0,
                     current_color: current_color.clone(),
                     paused: false,
+                    mouse_drift: false,
                 });
             }
             if let (Some(session), Some(path)) = (&session, &config.session_path) {
@@ -101,12 +117,51 @@ pub fn execute_plan(
             current_color = Some(hex.clone());
         }
 
+        // Track MoveTo targets for drift detection
+        if let PaintCommand::MoveTo { x, y } = &plan.commands[i] {
+            last_move_target = Some((*x, *y));
+        }
+
         let cmd = &plan.commands[i];
         if let Err(e) = execute_command(cmd, input) {
             return ExecutionResult::Error {
                 commands_executed: executed,
                 error: e,
             };
+        }
+
+        // Mouse drift detection: after a MoveTo, check if mouse is where we put it
+        if let (Some((expected_x, expected_y)), Some(ref ds)) = (last_move_target, &device_state) {
+            if matches!(plan.commands[i], PaintCommand::MoveTo { .. }) {
+                let mouse = ds.get_mouse();
+                let actual_x = mouse.coords.0;
+                let actual_y = mouse.coords.1;
+                let dx = (actual_x - expected_x).unsigned_abs();
+                let dy = (actual_y - expected_y).unsigned_abs();
+                let tolerance = config.drift_tolerance;
+
+                if dx > tolerance || dy > tolerance {
+                    // Drift detected — auto-pause
+                    control.paused.store(true, portable_atomic::Ordering::Relaxed);
+                    if let Some(ref tx) = config.progress_tx {
+                        let _ = tx.send(ProgressUpdate {
+                            commands_executed: executed,
+                            total_commands: total,
+                            percent: executed as f64 / total as f64 * 100.0,
+                            current_color: current_color.clone(),
+                            paused: true,
+                            mouse_drift: true,
+                        });
+                    }
+                    // Block until unpaused or cancelled
+                    if !control.check() {
+                        return ExecutionResult::Cancelled {
+                            commands_executed: executed,
+                            total_commands: total,
+                        };
+                    }
+                }
+            }
         }
 
         executed += 1;
@@ -138,6 +193,7 @@ pub fn execute_plan(
                     percent: pct,
                     current_color: current_color.clone(),
                     paused: is_paused,
+                    mouse_drift: false,
                 });
             }
         }
@@ -157,6 +213,7 @@ pub fn execute_plan(
             percent: 100.0,
             current_color,
             paused: false,
+            mouse_drift: false,
         });
     }
 
@@ -230,6 +287,7 @@ mod tests {
             session_path: None,
             progress_interval: 0,
             progress_tx: None,
+            drift_tolerance: 0,
         };
 
         let result = execute_plan(&plan, &mut input, &control, &config, None, 0);
@@ -255,6 +313,7 @@ mod tests {
             session_path: None,
             progress_interval: 0,
             progress_tx: None,
+            drift_tolerance: 0,
         };
 
         // Resume from command index 4

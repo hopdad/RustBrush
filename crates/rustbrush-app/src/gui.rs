@@ -744,6 +744,7 @@ impl RustBrushApp {
                 session_path,
                 progress_interval: 100,
                 progress_tx: Some(progress_tx),
+                drift_tolerance: 5,
             };
 
             let result = executor::execute_plan(
@@ -824,6 +825,7 @@ impl RustBrushApp {
                 session_path: None,
                 progress_interval: 100,
                 progress_tx: Some(progress_tx),
+                drift_tolerance: 5,
             };
 
             let result = executor::execute_plan(
@@ -1960,6 +1962,43 @@ impl RustBrushApp {
     }
 
     fn preview_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        // Painting warning overlay
+        if self.painting_active || self.painting_phase != PaintingPhase::Idle {
+            let drift_detected = self.paint_progress
+                .as_ref()
+                .map(|p| p.mouse_drift)
+                .unwrap_or(false);
+
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                if drift_detected {
+                    ui.heading("MOUSE DRIFT DETECTED");
+                    ui.add_space(10.0);
+                    ui.label("Your mouse was moved during painting!");
+                    ui.label("Painting has been auto-paused to prevent errors.");
+                    ui.add_space(10.0);
+                    ui.label("Move your mouse away, then click Resume in the sidebar.");
+                } else if self.painting_active {
+                    ui.heading("PAINTING IN PROGRESS");
+                    ui.add_space(10.0);
+                    ui.label("Do not move the mouse or use the keyboard!");
+                    ui.label("The mouse is being controlled by RustBrush.");
+                    ui.add_space(10.0);
+                    ui.label("F10 = Pause/Resume    ESC = Cancel");
+                } else if let PaintingPhase::WaitingForFrameSwitch { next_index } = self.painting_phase {
+                    ui.heading("SWITCH FRAMES IN-GAME");
+                    ui.add_space(10.0);
+                    ui.label(format!(
+                        "Switch to frame {} in the game's sign UI.",
+                        next_index + 1
+                    ));
+                    ui.label("Then click 'Continue Painting' in the sidebar.");
+                }
+                ui.add_space(20.0);
+            });
+            return;
+        }
+
         if self.source_image.is_none() {
             ui.centered_and_justified(|ui| {
                 ui.heading("Drag & drop an image or click Open Image");
