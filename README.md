@@ -57,13 +57,43 @@ RustBrush is designed with anti-cheat safety as a primary concern:
 - **Palette color strip** - Visual bar showing proportional color distribution
 - **Config file** - Persistent settings saved at `~/.rustbrush/config.json`
 
-## Usage
+## Installation
 
-### GUI Mode
+### Download (Windows)
+
+Grab the latest `rustbrush-windows-x86_64.zip` from [GitHub Releases](https://github.com/hopdad/RustBrush/releases). The zip contains two binaries:
+
+- **`rustbrush.exe`** - CLI mode
+- **`rustbrush-gui.exe`** - GUI mode (recommended for most users)
+
+No installer needed — just extract and run.
+
+### Build from Source
 
 ```bash
-rustbrush --gui
+git clone https://github.com/hopdad/RustBrush.git
+cd RustBrush
+cargo build --release
 ```
+
+On **Windows** (primary target), no extra dependencies are needed.
+
+On **Linux**, install these first:
+```bash
+sudo apt install libxdo-dev libxcb1-dev
+```
+
+Binaries will be at `target/release/rustbrush` and `target/release/rustbrush-gui`.
+
+## Usage
+
+### GUI Mode (Recommended)
+
+```bash
+rustbrush-gui
+```
+
+The GUI provides image preview, settings panels, live paint plan generation, and interactive region capture — all in one window.
 
 ### CLI Mode
 
@@ -90,20 +120,6 @@ rustbrush myimage.png --resume session.json --accept-risk
 
 # Save a preview image before painting
 rustbrush myimage.png --preview preview.png --dry-run
-```
-
-## Building
-
-```bash
-# Dependencies (Linux)
-sudo apt install libxdo-dev libxcb1-dev
-
-# Clone and build
-git clone https://github.com/hopdad/RustBrush.git
-cd RustBrush
-cargo build --release
-
-# The binary will be at target/release/rustbrush
 ```
 
 ## Architecture
