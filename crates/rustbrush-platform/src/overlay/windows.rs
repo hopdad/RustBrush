@@ -15,9 +15,9 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     GetSystemMetrics, PostMessageW, RegisterClassExW, SetLayeredWindowAttributes, ShowWindow,
-    CS_HREDRAW, CS_VREDRAW, LWA_COLORKEY, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNOACTIVATE, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CS_HREDRAW, CS_VREDRAW, LWA_ALPHA, LWA_COLORKEY, MSG, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNOACTIVATE, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use super::SelectionOverlay;
@@ -30,6 +30,13 @@ const BORDER_COLOR: u32 = 0x0000FF00; // RGB(0, 255, 0) in COLORREF
 
 /// Black outline color for contrast.
 const OUTLINE_COLOR: u32 = 0x00000000; // RGB(0, 0, 0) in COLORREF
+
+/// Semi-transparent fill color for the selection interior (dark green tint).
+const FILL_COLOR: u32 = 0x00004000; // RGB(0, 64, 0) in COLORREF — visible through alpha
+
+/// Overall window opacity (0-255). Applied to all non-colorkey pixels.
+/// Lower = more see-through. 160 ≈ 63% opacity.
+const WINDOW_ALPHA: u8 = 160;
 
 /// Border thickness in pixels.
 const BORDER_WIDTH: i32 = 3;
@@ -174,8 +181,9 @@ unsafe fn create_overlay_window() -> HWND {
         return 0;
     }
 
-    // Set the color key: magenta pixels become fully transparent.
-    SetLayeredWindowAttributes(hwnd, TRANSPARENT_COLOR, 0, LWA_COLORKEY);
+    // Color key: magenta pixels become fully transparent.
+    // Alpha: all other pixels rendered at WINDOW_ALPHA opacity so the game shows through.
+    SetLayeredWindowAttributes(hwnd, TRANSPARENT_COLOR, WINDOW_ALPHA, LWA_COLORKEY | LWA_ALPHA);
 
     // Show without activating (don't steal focus from game).
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -226,6 +234,15 @@ unsafe extern "system" fn wnd_proc(
                         let bottom = y1.max(y2) - vy;
 
                         let total = BORDER_WIDTH + OUTLINE_WIDTH;
+
+                        // Fill the selection interior with a tinted color (semi-transparent
+                        // via the window's LWA_ALPHA so the game is visible underneath).
+                        let fill_brush = CreateSolidBrush(FILL_COLOR);
+                        let fill_rect = windows_sys::Win32::Foundation::RECT {
+                            left, top, right, bottom,
+                        };
+                        FillRect(hdc, &fill_rect, fill_brush);
+                        DeleteObject(fill_brush);
 
                         // Draw black outline (slightly larger rectangle).
                         let outline_brush = CreateSolidBrush(OUTLINE_COLOR);

@@ -4,7 +4,7 @@ This guide walks you through installing RustBrush and painting your first sign.
 
 ## Installation
 
-### Windows (Recommended)
+### Download
 
 1. Download `rustbrush-windows-x86_64.zip` from [GitHub Releases](https://github.com/hopdad/RustBrush/releases)
 2. Extract the zip anywhere (e.g., your Desktop)
@@ -22,12 +22,7 @@ cd RustBrush
 cargo build --release
 ```
 
-On Linux, install dependencies first:
-```bash
-sudo apt install libxdo-dev libxcb1-dev
-```
-
-Binaries are output to `target/release/rustbrush` and `target/release/rustbrush-gui`.
+Binaries are output to `target/release/rustbrush.exe` and `target/release/rustbrush-gui.exe`.
 
 ## Before You Start
 

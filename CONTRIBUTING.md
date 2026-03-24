@@ -4,31 +4,13 @@ Thanks for your interest in contributing! This guide covers how to build, test, 
 
 ## Building from Source
 
-### Windows (Primary Target)
-
 ```bash
 git clone https://github.com/hopdad/RustBrush.git
 cd RustBrush
 cargo build --release
 ```
 
-No extra dependencies needed on Windows.
-
-### Linux
-
-Install dependencies first:
-```bash
-# Debian/Ubuntu
-sudo apt install libxdo-dev libxcb1-dev
-
-# Fedora/RHEL
-sudo dnf install libxdo-devel libxcb-devel
-```
-
-Then build:
-```bash
-cargo build --release
-```
+No extra dependencies needed. RustBrush targets Windows only.
 
 ## Running Tests
 

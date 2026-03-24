@@ -1,7 +1,7 @@
 //! Safe input simulation using enigo (OS-level SendInput).
 //!
 //! SAFETY GUARANTEES:
-//! - Uses only the OS-provided SendInput API (Windows) or xdotool (Linux)
+//! - Uses only the OS-provided SendInput API (Windows)
 //! - Never reads or writes game process memory
 //! - Never injects DLLs or hooks into any process
 //! - All input appears identical to physical mouse/keyboard actions

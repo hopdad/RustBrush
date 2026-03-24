@@ -38,8 +38,7 @@ Common problems and solutions when using RustBrush.
 
 **Solutions:**
 - Make sure the RustBrush window is running (it doesn't need to be focused, but it needs to be open).
-- On Linux, ensure you have the required packages: `sudo apt install libxdo-dev libxcb1-dev`.
-- Try running RustBrush as administrator (Windows) if hotkeys aren't being captured.
+- Try running RustBrush as administrator if hotkeys aren't being captured.
 - Check that no other application is consuming the same hotkeys.
 
 ## Image Looks Blocky
@@ -67,7 +66,7 @@ Common problems and solutions when using RustBrush.
 
 **Solutions:**
 - Make sure **Save session** was enabled before painting started.
-- Session files are saved in `~/.rustbrush/sessions/` (Windows: `%USERPROFILE%\.rustbrush\sessions\`).
+- Session files are saved in `%USERPROFILE%\.rustbrush\sessions\`.
 - In CLI mode, use: `rustbrush image.png --resume path/to/session.json --accept-risk`
 - In GUI mode, session resume is handled automatically if a saved session exists.
 - If the session file is corrupted, you'll need to start a fresh paint.
@@ -82,36 +81,15 @@ However, RustBrush is **not officially whitelisted** by Facepunch or EAC because
 
 **Recommendations:**
 - **Test on a private server first.** Launch your server with `+server.secure 0` to disable EAC.
-- The risk is considered low because the input method (`SendInput` on Windows, `xdotool` on Linux) is the same standard OS API used by accessibility tools, macros, and whitelisted software.
+- The risk is considered low because the input method (`SendInput`) is the same standard Windows API used by accessibility tools, macros, and whitelisted software.
 - RustBrush does not interact with the game process in any way — it only moves the mouse and sends clicks at the OS level.
 
 **Q: Why isn't RustBrush on Steam?**
 
 According to Facepunch, the only way to get EAC whitelisted is to publish on Steam. RustBrush is an open-source project distributed via GitHub.
 
-## Linux-Specific Issues
-
-### Build Errors
-
-Install required dependencies:
-```bash
-sudo apt install libxdo-dev libxcb1-dev
-```
-
-On Fedora/RHEL:
-```bash
-sudo dnf install libxdo-devel libxcb-devel
-```
-
-### Screen Capture Not Working
-
-On Wayland, screen capture may not work due to permission restrictions. Try running under X11 or XWayland:
-```bash
-GDK_BACKEND=x11 rustbrush-gui
-```
-
 ## Getting Help
 
 If your issue isn't covered here:
 - Check [GitHub Issues](https://github.com/hopdad/RustBrush/issues) for known problems
-- Open a new issue with your OS, RustBrush version, and steps to reproduce
+- Open a new issue with your RustBrush version and steps to reproduce

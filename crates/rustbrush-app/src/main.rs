@@ -1,6 +1,6 @@
 //! RustBrush - Automatic sign painter for Rust (the game)
 //!
-//! SAFETY: This tool uses ONLY OS-level input simulation (SendInput/xdotool).
+//! SAFETY: This tool uses ONLY OS-level input simulation (SendInput).
 //! It does NOT read or write game memory, inject DLLs, or hook into any process.
 //! However, it has NOT been whitelisted by Facepunch/EAC. Use at your own risk.
 
@@ -22,7 +22,7 @@ use device_query::Keycode;
 #[command(about = "Automatic sign painter for Rust (the game)")]
 #[command(after_help = "\
 SAFETY DISCLAIMER:
-  RustBrush uses only OS-level input simulation (SendInput/xdotool).
+  RustBrush uses only OS-level input simulation (SendInput).
   It does NOT inject into the game, read game memory, or modify game files.
 
   However, this tool has NOT been officially whitelisted by Facepunch or EAC.

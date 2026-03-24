@@ -6,7 +6,7 @@ An automatic sign painter for [Rust](https://rust.facepunch.com/) (the game). Pa
 
 RustBrush is designed with anti-cheat safety as a primary concern:
 
-- **OS-level input only** - Uses `SendInput` (Windows) / `xdotool` (Linux) via the [enigo](https://crates.io/crates/enigo) crate. This is the same approach used by [Rustangelo](https://store.steampowered.com/app/527440/Rustangelo/) and [RustForge](https://store.steampowered.com/app/4266520/RustForge_Sign_Painter/).
+- **OS-level input only** - Uses `SendInput` (Windows) via the [enigo](https://crates.io/crates/enigo) crate. This is the same approach used by [Rustangelo](https://store.steampowered.com/app/527440/Rustangelo/) and [RustForge](https://store.steampowered.com/app/4266520/RustForge_Sign_Painter/).
 - **No game memory access** - Never reads or writes to the Rust process memory.
 - **No DLL injection** - No code is injected into the game.
 - **No process hooking** - Never opens handles to or hooks into any game process.
@@ -76,14 +76,7 @@ cd RustBrush
 cargo build --release
 ```
 
-On **Windows** (primary target), no extra dependencies are needed.
-
-On **Linux**, install these first:
-```bash
-sudo apt install libxdo-dev libxcb1-dev
-```
-
-Binaries will be at `target/release/rustbrush` and `target/release/rustbrush-gui`.
+No extra dependencies are needed. Binaries will be at `target/release/rustbrush.exe` and `target/release/rustbrush-gui.exe`.
 
 ## Usage
 
@@ -161,7 +154,7 @@ crates/
         └── gui.rs         # egui/eframe GUI application
 ```
 
-**Why three crates:** Core logic is testable on any OS (CI on Linux). Platform layer is swappable. CLI/GUI is decoupled from algorithms.
+**Why three crates:** Core logic is testable without hardware. Platform layer handles OS input. CLI/GUI is decoupled from algorithms.
 
 ## How It Works
 

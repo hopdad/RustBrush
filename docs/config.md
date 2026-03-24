@@ -4,10 +4,9 @@ RustBrush saves your GUI settings to a JSON configuration file that persists bet
 
 ## File Location
 
-| Platform | Path |
-|----------|------|
-| Windows | `C:\Users\<username>\.rustbrush\config.json` |
-| Linux | `~/.rustbrush/config.json` |
+| Path |
+|------|
+| `C:\Users\<username>\.rustbrush\config.json` |
 
 The file is created automatically when you first change a setting in the GUI.
 
@@ -75,14 +74,8 @@ The file is created automatically when you first change a setting in the GUI.
 
 Delete the config file and relaunch the GUI:
 
-**Windows:**
 ```
 del %USERPROFILE%\.rustbrush\config.json
-```
-
-**Linux:**
-```bash
-rm ~/.rustbrush/config.json
 ```
 
 The CLI does not use the config file — all settings are passed as command-line arguments.
