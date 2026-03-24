@@ -72,13 +72,14 @@ impl WindowsOverlay {
         let state_clone = state.clone();
 
         // Channel to receive the HWND from the window thread.
-        let (tx, rx) = std::sync::mpsc::channel();
+        // Send as usize since *mut c_void is not Send.
+        let (tx, rx) = std::sync::mpsc::channel::<usize>();
 
         let handle = thread::spawn(move || {
             unsafe {
                 GLOBAL_STATE = Some(state_clone);
                 let hwnd = create_overlay_window();
-                let _ = tx.send(hwnd);
+                let _ = tx.send(hwnd as usize);
                 if !hwnd.is_null() {
                     run_message_loop();
                 }
@@ -87,11 +88,14 @@ impl WindowsOverlay {
         });
 
         match rx.recv() {
-            Ok(hwnd) if !hwnd.is_null() => Some(WindowsOverlay {
-                hwnd,
-                thread_handle: Some(handle),
-                state,
-            }),
+            Ok(val) if val != 0 => {
+                let hwnd = val as HWND;
+                Some(WindowsOverlay {
+                    hwnd,
+                    thread_handle: Some(handle),
+                    state,
+                })
+            }
             _ => None,
         }
     }
