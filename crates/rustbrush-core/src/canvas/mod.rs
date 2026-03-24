@@ -2,17 +2,23 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A canvas preset with width and height in pixels.
+/// A canvas preset with width, height, and animation frame count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanvasPreset {
     pub name: &'static str,
     pub width: u32,
     pub height: u32,
+    /// Number of animation frames (1 = static, 5 = animated neon sign).
+    pub frame_count: u32,
 }
 
 impl CanvasPreset {
     pub const fn new(name: &'static str, width: u32, height: u32) -> Self {
-        Self { name, width, height }
+        Self { name, width, height, frame_count: 1 }
+    }
+
+    pub const fn animated(name: &'static str, width: u32, height: u32, frame_count: u32) -> Self {
+        Self { name, width, height, frame_count }
     }
 }
 
@@ -39,7 +45,7 @@ pub const SPINNING_WHEEL: CanvasPreset = CanvasPreset::new("Spinning Wheel", 256
 pub const SMALL_NEON_SIGN: CanvasPreset = CanvasPreset::new("Small Neon Sign", 128, 128);
 pub const NEON_SIGN: CanvasPreset = CanvasPreset::new("Neon Sign", 256, 128);
 pub const LARGE_NEON_SIGN: CanvasPreset = CanvasPreset::new("Large Neon Sign", 256, 256);
-pub const LARGE_ANIMATED_NEON_SIGN: CanvasPreset = CanvasPreset::new("Large Animated Neon Sign", 256, 256);
+pub const LARGE_ANIMATED_NEON_SIGN: CanvasPreset = CanvasPreset::animated("Large Animated Neon Sign", 256, 256, 5);
 pub const PHOTO_FRAME: CanvasPreset = CanvasPreset::new("Photo Frame", 320, 240);
 
 /// All available canvas presets.

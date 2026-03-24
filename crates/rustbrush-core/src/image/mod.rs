@@ -2,6 +2,7 @@
 
 use image::RgbaImage;
 use image::imageops::FilterType;
+use image::AnimationDecoder;
 
 /// Aspect ratio handling when resizing images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +20,52 @@ pub fn load_image(path: &std::path::Path) -> Result<RgbaImage, String> {
     image::open(path)
         .map(|img| img.to_rgba8())
         .map_err(|e| format!("Failed to load image '{}': {}", path.display(), e))
+}
+
+/// Load all frames from a GIF file, returning them as RGBA images.
+/// Caps at `max_frames` to prevent excessive memory usage.
+pub fn load_gif_frames(path: &std::path::Path, max_frames: usize) -> Result<Vec<RgbaImage>, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("Failed to open GIF '{}': {}", path.display(), e))?;
+    let reader = std::io::BufReader::new(file);
+    let decoder = image::codecs::gif::GifDecoder::new(reader)
+        .map_err(|e| format!("Failed to decode GIF '{}': {}", path.display(), e))?;
+
+    let frames: Vec<RgbaImage> = decoder
+        .into_frames()
+        .take(max_frames)
+        .filter_map(|f| f.ok())
+        .map(|frame| frame.into_buffer())
+        .collect();
+
+    if frames.is_empty() {
+        return Err("GIF contains no frames".to_string());
+    }
+
+    Ok(frames)
+}
+
+/// Returns `true` if the file path has a GIF extension.
+pub fn is_gif(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("gif"))
+        .unwrap_or(false)
+}
+
+/// Select `count` evenly-spaced frame indices from a total of `total` frames.
+/// Returns indices distributed as evenly as possible across the range.
+pub fn select_evenly_spaced(total: usize, count: usize) -> Vec<usize> {
+    if total == 0 || count == 0 {
+        return vec![];
+    }
+    let count = count.min(total);
+    if count == 1 {
+        return vec![0];
+    }
+    (0..count)
+        .map(|i| i * (total - 1) / (count - 1))
+        .collect()
 }
 
 /// Resize an image to the target dimensions.
@@ -139,5 +186,29 @@ mod tests {
         // All channels should be equal (grayscale)
         assert_eq!(p[0], p[1]);
         assert_eq!(p[1], p[2]);
+    }
+
+    #[test]
+    fn test_select_evenly_spaced_basic() {
+        assert_eq!(select_evenly_spaced(30, 5), vec![0, 7, 14, 21, 29]);
+        assert_eq!(select_evenly_spaced(5, 5), vec![0, 1, 2, 3, 4]);
+        assert_eq!(select_evenly_spaced(10, 3), vec![0, 4, 9]);
+        assert_eq!(select_evenly_spaced(1, 5), vec![0]);
+        assert_eq!(select_evenly_spaced(2, 5), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_select_evenly_spaced_edge_cases() {
+        assert_eq!(select_evenly_spaced(0, 5), Vec::<usize>::new());
+        assert_eq!(select_evenly_spaced(10, 0), Vec::<usize>::new());
+        assert_eq!(select_evenly_spaced(10, 1), vec![0]);
+    }
+
+    #[test]
+    fn test_is_gif() {
+        assert!(is_gif(std::path::Path::new("test.gif")));
+        assert!(is_gif(std::path::Path::new("test.GIF")));
+        assert!(!is_gif(std::path::Path::new("test.png")));
+        assert!(!is_gif(std::path::Path::new("test")));
     }
 }

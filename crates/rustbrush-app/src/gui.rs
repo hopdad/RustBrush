@@ -103,6 +103,18 @@ struct RustBrushApp {
     hex_field_pos: Option<(i32, i32)>,
     resume_index: usize,
 
+    // GIF / animation state
+    gif_frames: Option<Vec<image::RgbaImage>>,
+    gif_frame_thumbs: Vec<egui::TextureHandle>,
+    selected_frame_indices: Vec<usize>,
+    active_frame_slot: usize,
+    animation_mode: bool,
+    frame_previews: Vec<Option<image::RgbaImage>>,
+    frame_preview_textures: Vec<Option<egui::TextureHandle>>,
+    frame_groups: Vec<Option<Vec<ColorGroup>>>,
+    frame_plans: Vec<Option<PaintPlan>>,
+    painting_phase: PaintingPhase,
+
     // Calibration state
     calibration_rx: Option<mpsc::Receiver<CalibrationResult>>,
     calibrating: bool,
@@ -197,6 +209,15 @@ impl QualityPreset {
     }
 }
 
+/// Phase of multi-frame painting (for animated neon signs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PaintingPhase {
+    Idle,
+    PaintingFrame { index: usize },
+    WaitingForFrameSwitch { next_index: usize },
+    Complete,
+}
+
 /// Result from a background calibration capture.
 enum CalibrationResult {
     CanvasRegion(Result<region::ScreenRegion, String>),
@@ -281,6 +302,17 @@ impl RustBrushApp {
             hex_field_pos: None,
             resume_index: 0,
 
+            gif_frames: None,
+            gif_frame_thumbs: Vec::new(),
+            selected_frame_indices: Vec::new(),
+            active_frame_slot: 0,
+            animation_mode: false,
+            frame_previews: vec![None; 5],
+            frame_preview_textures: vec![None; 5],
+            frame_groups: vec![None; 5],
+            frame_plans: vec![None; 5],
+            painting_phase: PaintingPhase::Idle,
+
             calibration_rx: None,
             calibrating: false,
             calibration_label: String::new(),
@@ -336,6 +368,26 @@ impl RustBrushApp {
     }
 
     fn load_image(&mut self, path: PathBuf) {
+        // Reset animation state
+        self.animation_mode = false;
+        self.gif_frames = None;
+        self.gif_frame_thumbs.clear();
+        self.selected_frame_indices.clear();
+        self.active_frame_slot = 0;
+        self.frame_previews = vec![None; 5];
+        self.frame_preview_textures = vec![None; 5];
+        self.frame_groups = vec![None; 5];
+        self.frame_plans = vec![None; 5];
+        self.painting_phase = PaintingPhase::Idle;
+
+        if rb_image::is_gif(&path) {
+            self.load_gif(path);
+        } else {
+            self.load_static_image(path);
+        }
+    }
+
+    fn load_static_image(&mut self, path: PathBuf) {
         match rb_image::load_image(&path) {
             Ok(img) => {
                 self.source_image = Some(img);
@@ -356,6 +408,57 @@ impl RustBrushApp {
                 self.status_message = format!("Failed to load image: {}", e);
             }
         }
+    }
+
+    fn load_gif(&mut self, path: PathBuf) {
+        match rb_image::load_gif_frames(&path, 500) {
+            Ok(frames) => {
+                let frame_count = frames.len();
+                // Determine max selectable frames from canvas preset
+                let max_frames = self.current_preset_frame_count().min(frame_count);
+                let selected = rb_image::select_evenly_spaced(frame_count, max_frames);
+
+                // Use the first selected frame as source_image for single-frame compatibility
+                if let Some(&first_idx) = selected.first() {
+                    self.source_image = Some(frames[first_idx].clone());
+                }
+
+                self.selected_frame_indices = selected;
+                self.gif_frames = Some(frames);
+                self.animation_mode = max_frames > 1;
+                self.active_frame_slot = 0;
+                self.image_path = Some(path);
+                self.source_texture = None;
+                self.preview_texture = None;
+                self.preview_image = None;
+                self.mapped_pixels = None;
+                self.paint_groups = None;
+                self.paint_plan = None;
+                self.last_pixel_count = None;
+                self.last_color_count = None;
+                self.update_time_estimate();
+                self.mark_settings_changed(true);
+
+                if self.animation_mode {
+                    self.status_message = format!(
+                        "GIF loaded: {} frames, {} selected for animation.",
+                        frame_count, self.selected_frame_indices.len()
+                    );
+                } else {
+                    self.status_message = format!(
+                        "GIF loaded: {} frames (single-frame mode).", frame_count
+                    );
+                }
+            }
+            Err(e) => {
+                self.status_message = format!("Failed to load GIF: {}", e);
+            }
+        }
+    }
+
+    fn current_preset_frame_count(&self) -> usize {
+        let presets = canvas::all_presets();
+        presets[self.canvas_preset_idx].frame_count as usize
     }
 
     fn generate_plan(&mut self) {
@@ -552,6 +655,12 @@ impl RustBrushApp {
 
     /// Actually launch the painter worker thread.
     fn start_painting(&mut self) {
+        // In animation mode, start painting the current frame
+        if self.animation_mode && self.painting_phase == PaintingPhase::Idle {
+            self.start_painting_frame(0);
+            return;
+        }
+
         let Some(ref plan) = self.paint_plan else {
             self.status_message = "Generate a plan first.".to_string();
             return;
@@ -642,6 +751,85 @@ impl RustBrushApp {
                 Some(&mut session), start_index,
             );
 
+            let _ = result_tx.send(result);
+        });
+    }
+
+    /// Start painting a specific animation frame by slot index.
+    fn start_painting_frame(&mut self, frame_slot: usize) {
+        let plan = match self.frame_plans.get(frame_slot).and_then(|p| p.as_ref()) {
+            Some(plan) => plan.clone(),
+            None => {
+                self.status_message = format!("Frame {} has no plan.", frame_slot + 1);
+                return;
+            }
+        };
+        let Some(canvas_region) = self.canvas_region else {
+            self.status_message = "Set the canvas region first.".to_string();
+            return;
+        };
+
+        let control = Arc::new(PaintControl::new());
+        control.start_listener();
+        self.paint_control = Some(control.clone());
+
+        let delay_ms = self.delay_ms;
+        let hex_input = self.hex_input || self.adaptive_palette;
+        let hex_field_pos = self.hex_field_pos;
+
+        let image_path_str = self.image_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let mut session = Session::new(
+            plan.clone(), canvas_region, image_path_str,
+            self.canvas_width(), self.canvas_height(),
+        );
+
+        let (progress_tx, progress_rx) = mpsc::channel();
+        self.paint_progress_rx = Some(progress_rx);
+        let (result_tx, result_rx) = mpsc::channel();
+        self.paint_result_rx = Some(result_rx);
+
+        self.painting_active = true;
+        self.paint_progress = None;
+        self.painting_phase = PaintingPhase::PaintingFrame { index: frame_slot };
+        self.status_message = format!(
+            "Painting frame {}/{}... F10=pause, ESC=cancel",
+            frame_slot + 1, self.selected_frame_indices.len()
+        );
+
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+
+            let mut input = match SafeInput::new(Duration::from_millis(delay_ms as u64)) {
+                Ok(input) => input,
+                Err(e) => {
+                    let _ = result_tx.send(ExecutionResult::Error {
+                        commands_executed: 0, error: e,
+                    });
+                    return;
+                }
+            };
+
+            if hex_input {
+                if let Some((hx, hy)) = hex_field_pos {
+                    let _ = input.move_to(hx, hy);
+                }
+            }
+
+            let config = ExecutorConfig {
+                save_interval: 0,
+                session_path: None,
+                progress_interval: 100,
+                progress_tx: Some(progress_tx),
+            };
+
+            let result = executor::execute_plan(
+                &plan, &mut input, &control, &config,
+                Some(&mut session), 0,
+            );
             let _ = result_tx.send(result);
         });
     }
@@ -801,9 +989,33 @@ impl eframe::App for RustBrushApp {
 
                 match result {
                     ExecutionResult::Completed { commands_executed } => {
-                        self.status_message = format!(
-                            "Painting complete! {} commands executed.", commands_executed
-                        );
+                        // Check if we're in animation mode and have more frames
+                        if let PaintingPhase::PaintingFrame { index } = self.painting_phase {
+                            let total_frames = self.selected_frame_indices.len();
+                            if index + 1 < total_frames {
+                                // More frames to paint — wait for user to switch
+                                self.painting_phase = PaintingPhase::WaitingForFrameSwitch {
+                                    next_index: index + 1,
+                                };
+                                self.status_message = format!(
+                                    "Frame {}/{} complete! Switch to frame {} in-game, then click Continue.",
+                                    index + 1, total_frames, index + 2
+                                );
+                            } else {
+                                // All frames done
+                                self.painting_phase = PaintingPhase::Complete;
+                                self.status_message = format!(
+                                    "All {} frames painted! {} commands on last frame.",
+                                    total_frames, commands_executed
+                                );
+                            }
+                        } else {
+                            // Single-frame mode
+                            self.status_message = format!(
+                                "Painting complete! {} commands executed.", commands_executed
+                            );
+                            self.painting_phase = PaintingPhase::Idle;
+                        }
                         // Clean up session file on success
                         if let Some(ref path) = self.session_path {
                             let _ = std::fs::remove_file(path);
@@ -811,11 +1023,13 @@ impl eframe::App for RustBrushApp {
                         self.session_path = None;
                     }
                     ExecutionResult::Cancelled { commands_executed, total_commands } => {
+                        self.painting_phase = PaintingPhase::Idle;
                         self.status_message = format!(
                             "Painting cancelled at {}/{}.", commands_executed, total_commands
                         );
                     }
                     ExecutionResult::Error { commands_executed, error } => {
+                        self.painting_phase = PaintingPhase::Idle;
                         self.status_message = format!(
                             "Painting error after {} commands: {}", commands_executed, error
                         );
@@ -939,6 +1153,12 @@ impl RustBrushApp {
         }
 
         ui.separator();
+
+        // --- Animation Frames (GIF) ---
+        if self.animation_mode {
+            self.animation_ui(ui);
+            ui.separator();
+        }
 
         // --- Quality Preset ---
         ui.heading("Quality");
@@ -1215,9 +1435,41 @@ impl RustBrushApp {
         }
 
         // --- Painting Progress ---
+        if let PaintingPhase::WaitingForFrameSwitch { next_index } = self.painting_phase {
+            ui.separator();
+            ui.heading("Frame Switch");
+            ui.label(format!(
+                "Switch to frame {} in the game's sign UI, then click Continue.",
+                next_index + 1
+            ));
+            if ui.button("Continue Painting").clicked() {
+                self.start_painting_frame(next_index);
+            }
+            if ui.button("Cancel").clicked() {
+                self.painting_phase = PaintingPhase::Idle;
+                self.status_message = "Animation painting cancelled.".to_string();
+            }
+        }
+
+        if self.painting_phase == PaintingPhase::Complete {
+            ui.separator();
+            ui.heading("Complete");
+            ui.label("All animation frames have been painted!");
+            if ui.button("Done").clicked() {
+                self.painting_phase = PaintingPhase::Idle;
+            }
+        }
+
         if self.painting_active {
             ui.separator();
             ui.heading("Painting");
+
+            // Show frame indicator in animation mode
+            if let PaintingPhase::PaintingFrame { index } = self.painting_phase {
+                ui.label(format!(
+                    "Frame {}/{}", index + 1, self.selected_frame_indices.len()
+                ));
+            }
 
             if let Some(ref progress) = self.paint_progress {
                 let pct = progress.percent as f32 / 100.0;
@@ -1369,6 +1621,228 @@ impl RustBrushApp {
                 }
             }
         }
+    }
+
+    fn animation_ui(&mut self, ui: &mut egui::Ui) {
+        let num_slots = self.selected_frame_indices.len();
+        ui.heading(format!("Animation ({} frames)", num_slots));
+
+        // Frame slot selector — numbered buttons
+        ui.horizontal(|ui| {
+            ui.label("Slots:");
+            for slot in 0..num_slots {
+                let label = format!("{}", slot + 1);
+                let selected = slot == self.active_frame_slot;
+                if ui.selectable_label(selected, &label).clicked() {
+                    self.active_frame_slot = slot;
+                    // Update source_image to match this slot's GIF frame
+                    if let Some(ref frames) = self.gif_frames {
+                        if let Some(&idx) = self.selected_frame_indices.get(slot) {
+                            if idx < frames.len() {
+                                self.source_image = Some(frames[idx].clone());
+                                self.source_texture = None;
+                                // Show this slot's preview if available
+                                self.preview_image = self.frame_previews[slot].clone();
+                                self.preview_texture = None;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Filmstrip — scrollable row of all GIF frame thumbnails
+        let total_frames = self.gif_frames.as_ref().map(|f| f.len()).unwrap_or(0);
+        if total_frames > 0 {
+            ui.label(format!("All frames ({}):", total_frames));
+
+            // Collect click in filmstrip without mutating self
+            let mut clicked_frame: Option<usize> = None;
+            egui::ScrollArea::horizontal().max_height(56.0).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for i in 0..total_frames {
+                        let is_selected = self.selected_frame_indices.contains(&i);
+                        let btn_text = format!("{}", i + 1);
+                        if ui.selectable_label(is_selected, &btn_text).clicked() {
+                            clicked_frame = Some(i);
+                        }
+                    }
+                });
+            });
+
+            // Apply filmstrip click
+            if let Some(frame_idx) = clicked_frame {
+                if let Some(slot) = self.selected_frame_indices.get_mut(self.active_frame_slot) {
+                    *slot = frame_idx;
+                }
+                if let Some(ref frames) = self.gif_frames {
+                    if let Some(frame) = frames.get(frame_idx) {
+                        self.source_image = Some(frame.clone());
+                    }
+                }
+                self.source_texture = None;
+                let slot = self.active_frame_slot;
+                self.frame_previews[slot] = None;
+                self.frame_preview_textures[slot] = None;
+                self.frame_groups[slot] = None;
+                self.frame_plans[slot] = None;
+                self.preview_image = None;
+                self.preview_texture = None;
+                self.mark_settings_changed(true);
+            }
+
+            // Auto-select button
+            let mut do_auto_select = false;
+            if ui.button("Auto-select evenly spaced").clicked() {
+                do_auto_select = true;
+            }
+            if do_auto_select {
+                let max_frames = self.current_preset_frame_count().min(total_frames);
+                self.selected_frame_indices = rb_image::select_evenly_spaced(total_frames, max_frames);
+                self.active_frame_slot = 0;
+                self.frame_previews = vec![None; 5];
+                self.frame_preview_textures = vec![None; 5];
+                self.frame_groups = vec![None; 5];
+                self.frame_plans = vec![None; 5];
+                if let Some(&first_idx) = self.selected_frame_indices.first() {
+                    if let Some(ref frames) = self.gif_frames {
+                        if let Some(frame) = frames.get(first_idx) {
+                            self.source_image = Some(frame.clone());
+                            self.source_texture = None;
+                        }
+                    }
+                }
+                self.preview_image = None;
+                self.preview_texture = None;
+                self.mark_settings_changed(true);
+            }
+
+            // Process All Frames / Generate All Plans buttons
+            let mut do_process_all = false;
+            let mut do_generate_all = false;
+            ui.horizontal(|ui| {
+                if ui.button("Process All Frames").clicked() {
+                    do_process_all = true;
+                }
+                if ui.button("Generate All Plans").clicked() {
+                    do_generate_all = true;
+                }
+            });
+            if do_process_all {
+                self.process_all_animation_frames();
+            }
+            if do_generate_all {
+                self.generate_all_plans();
+            }
+
+            // Show per-frame status
+            for (slot, idx) in self.selected_frame_indices.iter().enumerate() {
+                let has_preview = self.frame_previews.get(slot).and_then(|p| p.as_ref()).is_some();
+                let has_plan = self.frame_plans.get(slot).and_then(|p| p.as_ref()).is_some();
+                let status = if has_plan { "planned" } else if has_preview { "processed" } else { "pending" };
+                ui.small(format!("  Slot {} (frame {}): {}", slot + 1, idx + 1, status));
+            }
+        }
+    }
+
+    fn process_all_animation_frames(&mut self) {
+        let Some(ref frames) = self.gif_frames else { return };
+
+        for slot in 0..self.selected_frame_indices.len() {
+            let Some(&frame_idx) = self.selected_frame_indices.get(slot) else { continue };
+            let Some(frame) = frames.get(frame_idx) else { continue };
+
+            // Process this frame synchronously (could be optimized to background later)
+            let w = self.canvas_width();
+            let h = self.canvas_height();
+            let mut resized = rb_image::resize(frame, w, h, rb_image::AspectRatio::Stretch);
+
+            if (self.brightness - 1.0).abs() > 0.01 {
+                resized = rb_image::adjust_brightness(&resized, self.brightness);
+            }
+            if (self.contrast - 1.0).abs() > 0.01 {
+                resized = rb_image::adjust_contrast(&resized, self.contrast);
+            }
+            if (self.saturation - 1.0).abs() > 0.01 {
+                resized = rb_image::adjust_saturation(&resized, self.saturation);
+            }
+
+            let skip_color = if self.skip_color_enabled {
+                parse_hex_color(&self.skip_color_hex).ok()
+            } else {
+                None
+            };
+
+            let palette = if self.adaptive_palette {
+                generate_adaptive_palette(&resized, self.adaptive_colors)
+            } else {
+                rust_palette()
+            };
+
+            let opts = QuantizeOptions {
+                algorithm: self.color_match,
+                dither: self.dither,
+                alpha_threshold: self.alpha_threshold,
+                skip_color,
+                ..Default::default()
+            };
+
+            let mapped = map_image_to_palette(&resized, &palette, &opts);
+            let preview = build_preview(&resized, &mapped);
+            let groups = painting::group_by_color(&mapped);
+
+            self.frame_previews[slot] = Some(preview);
+            self.frame_preview_textures[slot] = None;
+            self.frame_groups[slot] = Some(groups);
+        }
+
+        // Show the active slot's preview
+        self.preview_image = self.frame_previews[self.active_frame_slot].clone();
+        self.preview_texture = None;
+        self.status_message = format!(
+            "All {} frames processed.", self.selected_frame_indices.len()
+        );
+    }
+
+    fn generate_all_plans(&mut self) {
+        let canvas = ScreenRect {
+            x: 0, y: 0,
+            width: self.canvas_width(),
+            height: self.canvas_height(),
+        };
+
+        let use_hex = self.hex_input || self.adaptive_palette;
+        let mut total_commands = 0usize;
+
+        for slot in 0..self.selected_frame_indices.len() {
+            let Some(ref groups) = self.frame_groups[slot] else { continue };
+
+            let strategy: Box<dyn PaintStrategy> = match self.strategy {
+                StrategyChoice::Hybrid => Box::new(painting::HybridStrategy::default()),
+                StrategyChoice::ColorGrouped => Box::new(painting::ColorGroupedStrategy),
+                StrategyChoice::LineDraw => Box::new(painting::LineDrawStrategy::default()),
+                StrategyChoice::Scanline => Box::new(painting::ScanlineStrategy),
+            };
+
+            let plan = strategy.plan(
+                groups, &canvas,
+                self.canvas_width(), self.canvas_height(),
+                use_hex, 30,
+            );
+
+            total_commands += plan.metadata.total_commands;
+            self.frame_plans[slot] = Some(plan);
+        }
+
+        let total_time: f64 = self.frame_plans.iter()
+            .filter_map(|p| p.as_ref())
+            .map(|p| painting::estimate_time(p, self.delay_ms as u64))
+            .sum();
+
+        self.status_message = format!(
+            "All plans generated: {} total commands, est. {:.0}s",
+            total_commands, total_time
+        );
     }
 
     fn advanced_settings_ui(&mut self, ui: &mut egui::Ui) {
