@@ -185,7 +185,7 @@ impl StrategyChoice {
         }
     }
 
-    fn to_config_str(&self) -> &str {
+    fn as_config_str(&self) -> &str {
         match self {
             Self::Hybrid => "hybrid",
             Self::ColorGrouped => "color-grouped",
@@ -241,7 +241,7 @@ impl QualityPreset {
         }
     }
 
-    fn to_config_str(&self) -> &str {
+    fn as_config_str(&self) -> &str {
         match self {
             Self::Speed => "speed",
             Self::Balanced => "balanced",
@@ -444,7 +444,7 @@ impl RustBrushApp {
                 DitherMode::Ordered => "ordered",
             }
             .to_string(),
-            strategy: self.strategy.to_config_str().to_string(),
+            strategy: self.strategy.as_config_str().to_string(),
             alpha_threshold: self.alpha_threshold,
             delay_ms: self.delay_ms,
             hex_input: self.hex_input,
@@ -461,7 +461,7 @@ impl RustBrushApp {
             median_enabled: self.median_enabled,
             median_radius: self.median_radius,
             path_optimizer: self.path_optimizer,
-            quality_preset: self.quality_preset.to_config_str().to_string(),
+            quality_preset: self.quality_preset.as_config_str().to_string(),
         };
         let _ = config.save_default();
     }
@@ -681,7 +681,7 @@ impl RustBrushApp {
         self.estimated_time_secs = Some(painting::estimate_time_approx(
             pixels,
             colors,
-            self.strategy.to_config_str(),
+            self.strategy.as_config_str(),
             self.delay_ms as u64,
             use_hex,
         ));
@@ -1726,13 +1726,13 @@ impl RustBrushApp {
                     {
                         self.start_palette_capture();
                     }
-                    if self.palette_region.is_some() && self.scanned_palette.is_some() {
-                        if ui.button("Rescan")
+                    if self.palette_region.is_some()
+                        && self.scanned_palette.is_some()
+                        && ui.button("Rescan")
                             .on_hover_text("Re-sample colors from the same palette region")
                             .clicked()
-                        {
-                            self.rescan_palette();
-                        }
+                    {
+                        self.rescan_palette();
                     }
                     if let Some(ref entries) = self.scanned_palette {
                         ui.label(format!("{} colors", entries.len()));
@@ -1913,10 +1913,8 @@ impl RustBrushApp {
                     if ui.button("Resume (F10)").clicked() {
                         self.toggle_pause();
                     }
-                } else {
-                    if ui.button("Pause (F10)").clicked() {
-                        self.toggle_pause();
-                    }
+                } else if ui.button("Pause (F10)").clicked() {
+                    self.toggle_pause();
                 }
                 if ui.button("Cancel (ESC)").clicked() {
                     self.stop_painting();
@@ -2599,10 +2597,10 @@ impl RustBrushApp {
             if ui.checkbox(&mut self.text_bg_transparent, "Transparent").changed() {
                 changed = true;
             }
-            if !self.text_bg_transparent {
-                if ui.color_edit_button_srgb(&mut self.text_bg_color).changed() {
-                    changed = true;
-                }
+            if !self.text_bg_transparent
+                && ui.color_edit_button_srgb(&mut self.text_bg_color).changed()
+            {
+                changed = true;
             }
         });
 

@@ -15,12 +15,18 @@ pub struct PaintControl {
     pub cancelled: Arc<AtomicBool>,
 }
 
-impl PaintControl {
-    pub fn new() -> Self {
+impl Default for PaintControl {
+    fn default() -> Self {
         Self {
             paused: Arc::new(AtomicBool::new(false)),
             cancelled: Arc::new(AtomicBool::new(false)),
         }
+    }
+}
+
+impl PaintControl {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Start the background hotkey listener thread.

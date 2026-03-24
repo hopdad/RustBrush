@@ -99,13 +99,14 @@ impl InputDriver for SafeInput {
 }
 
 /// Dry-run input driver that logs actions without sending real input.
+#[derive(Default)]
 pub struct DryRunInput {
     pub log: Vec<String>,
 }
 
 impl DryRunInput {
     pub fn new() -> Self {
-        Self { log: Vec::new() }
+        Self::default()
     }
 }
 

@@ -61,6 +61,7 @@ pub struct ColorGroup {
 /// Group mapped pixels by color for efficient painting.
 /// Sorts groups by pixel count descending (most common colors first).
 pub fn group_by_color(pixels: &[MappedPixel]) -> Vec<ColorGroup> {
+    #[allow(clippy::type_complexity)]
     let mut groups: HashMap<(u8, u8, u8), (String, Vec<(u32, u32)>)> = HashMap::new();
 
     for pixel in pixels {

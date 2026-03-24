@@ -173,7 +173,7 @@ pub fn execute_plan(
 
         // Periodic save
         if config.save_interval > 0
-            && executed % config.save_interval == 0
+            && executed.is_multiple_of(config.save_interval)
         {
             if let (Some(session), Some(path)) = (&session, &config.session_path) {
                 let _ = session.save(path);
@@ -181,7 +181,7 @@ pub fn execute_plan(
         }
 
         // Progress reporting
-        if config.progress_interval > 0 && executed % config.progress_interval == 0 {
+        if config.progress_interval > 0 && executed.is_multiple_of(config.progress_interval) {
             let pct = (i + 1) as f64 / total as f64 * 100.0;
             println!("  Progress: {}/{} ({:.1}%)", i + 1, total, pct);
 

@@ -45,7 +45,7 @@ fn dist_sq(x0: u32, y0: u32, x1: u32, y1: u32) -> i64 {
 /// and repeatedly reverses sub-paths that reduce total travel distance.
 ///
 /// `max_iterations`: maximum number of full passes (0 = unlimited, run until convergence).
-pub(crate) fn optimize_2opt(segments: &mut Vec<PaintSegment>, max_iterations: usize) -> OptimizeResult {
+pub(crate) fn optimize_2opt(segments: &mut [PaintSegment], max_iterations: usize) -> OptimizeResult {
     let original_distance = total_travel_distance(segments);
 
     let n = segments.len();

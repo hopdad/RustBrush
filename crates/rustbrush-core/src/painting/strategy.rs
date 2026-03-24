@@ -35,6 +35,7 @@ impl PaintStrategy for ScanlineStrategy {
         use_hex: bool,
         color_switch_delay_ms: u32,
     ) -> PaintPlan {
+        #[allow(clippy::type_complexity)]
         let mut all_pixels: Vec<(u32, u32, (u8, u8, u8), String)> = Vec::new();
         for group in groups {
             for &(px, py) in &group.pixels {
@@ -339,8 +340,8 @@ fn detect_line_segments(pixels: &[(u32, u32)], min_run_length: u32) -> Vec<Paint
                 let x_start = xs[i];
                 let x_end = xs[j];
                 segments.push(PaintSegment::HLine { y, x_start, x_end });
-                for k in i..=j {
-                    used.insert((xs[k], y));
+                for x in &xs[i..=j] {
+                    used.insert((*x, y));
                 }
             }
 

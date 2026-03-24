@@ -24,19 +24,48 @@ RustBrush is designed with anti-cheat safety as a primary concern:
 
 ## Features
 
+### Image Processing
 - **Perceptual color matching (CIEDE2000)** - Accurate color reproduction using human-perceptual distance
-- **Dithering** - Floyd-Steinberg error-diffusion and ordered (Bayer) dithering for quality with limited palettes
-- **Interactive region capture** - Mark your canvas and palette areas on screen (F9/F8 hotkeys)
-- **Hex code input mode** - Type hex colors directly for exact reproduction (--hex-input)
-- **Auto palette sampling** - Reads actual colors from your screen
-- **Color-grouped painting** - Groups pixels by color with nearest-neighbor ordering to minimize palette switches and mouse travel
+- **Dithering** - Floyd-Steinberg error-diffusion and ordered (Bayer) dithering
+- **Adaptive 512-color palette** - K-means++ clustering in Lab space for optimal hex colors
+- **Image adjustments** - Brightness, contrast, saturation sliders
+- **Image transforms** - Rotate CW/CCW, flip horizontal/vertical
+- **Crop margins** - Percentage-based crop sliders applied before resize
+- **Simplification filters** - Median filter, Gaussian blur, posterize for reducing detail
+- **GIF/animation support** - Load GIF files, select frames, process multi-frame animations
+
+### Painting
+- **Interactive region capture** - Mark canvas (F9), palette (F8) areas on screen
+- **Hex code input mode** - Type hex colors directly for exact reproduction
+- **Palette scanning (F7)** - Detect available colors and click positions from the in-game palette
 - **Canvas presets** - Built-in dimensions for all sign types (wooden signs, frames, banners, neon signs, etc.)
-- **Pause/Resume/Cancel** - F10 to pause/resume, ESC to cancel mid-paint
-- **Dry-run mode** - Preview what would be painted without sending any input
-- **Image adjustments** - Brightness, contrast, and saturation controls
-- **Configurable speed** - Adjust delay between mouse actions
+- **Painting strategies** - Hybrid, color-grouped, line-draw, and scanline strategies
+- **Line drawing optimization** - Detects horizontal runs and uses shift-click for speed
+- **Path optimizer (2-opt)** - Reorders paint segments to minimize total mouse travel
+- **Adaptive delays** - Auto-tunes painting speed based on success/failure
+- **Pause/Resume/Cancel** - F10 to pause/resume, ESC to cancel
+- **Progress save/resume** - JSON session files with auto-save, `--resume` flag
+- **Quality presets** - Speed/Balanced/Quality/Maximum one-click configurations
+
+### Content Creation
+- **Text-to-image builder** - Type text, choose font/size/color/alignment, render as source image
+- **Clipart library** - Built-in gallery of 24 icons (arrows, warnings, symbols, borders, text labels)
+
+### GUI
+- **Full GUI mode** - egui/eframe window with image preview, settings, and live plan generation
+- **Preview A/B toggle** - Side-by-side, original-only, or preview-only display modes
+- **Palette color strip** - Visual bar showing proportional color distribution
+- **Config file** - Persistent settings saved at `~/.rustbrush/config.json`
 
 ## Usage
+
+### GUI Mode
+
+```bash
+rustbrush --gui
+```
+
+### CLI Mode
 
 ```bash
 # Dry run - preview what would be painted (no input sent)
@@ -56,8 +85,8 @@ rustbrush myimage.png --preset "wooden sign" --accept-risk
 # Custom canvas size with dithering and hex input
 rustbrush myimage.png -W 128 -H 128 --dither floyd-steinberg --hex-input --accept-risk
 
-# Fast RGB color matching (less accurate but faster)
-rustbrush myimage.png --color-match rgb --accept-risk
+# Resume an interrupted session
+rustbrush myimage.png --resume session.json --accept-risk
 
 # Save a preview image before painting
 rustbrush myimage.png --preview preview.png --dry-run
@@ -85,31 +114,36 @@ RustBrush is organized as a three-crate Cargo workspace:
 crates/
 ├── rustbrush-core/        # Pure library: color science, image processing, paint planning
 │   └── src/
-│       ├── color/         # CIEDE2000, palette definitions, color matching, dithering
-│       ├── image/         # Loading, resize, brightness/contrast/saturation
-│       ├── painting/      # PaintPlan, PaintCommand, strategies (scanline, color-grouped)
-│       ├── canvas/        # Sign dimension presets for all sign types
+│       ├── color/         # CIEDE2000, palette, color matching, dithering, adaptive palette
+│       ├── image/         # Loading, resize, adjustments, transforms, filters
+│       ├── painting/      # PaintPlan, PaintCommand, strategies, optimizer
+│       ├── canvas/        # Sign dimension presets
+│       ├── text/          # Text-to-image rendering
+│       ├── library/       # Built-in clipart catalog and generation
 │       └── session/       # Save/resume state
 ├── rustbrush-platform/    # OS-specific: input simulation, screen capture, hotkeys
 │   └── src/
 │       ├── input/         # InputDriver trait + enigo implementation + dry-run driver
 │       ├── capture/       # Screen capture and palette sampling
+│       ├── executor/      # PaintPlan execution with pause/cancel/resume
 │       └── hotkey/        # Global hotkey listener + interactive region capture
-└── rustbrush-app/         # CLI application
+└── rustbrush-app/         # Application (CLI + GUI)
     └── src/
-        └── main.rs        # CLI argument parsing and orchestration
+        ├── main.rs        # CLI argument parsing and orchestration
+        └── gui.rs         # egui/eframe GUI application
 ```
 
-**Why three crates:** Core logic is testable on any OS (CI on Linux). Platform layer is swappable. CLI is decoupled from algorithms.
+**Why three crates:** Core logic is testable on any OS (CI on Linux). Platform layer is swappable. CLI/GUI is decoupled from algorithms.
 
 ## How It Works
 
 1. **Load** - Reads the input image and resizes it to the target canvas dimensions (Lanczos3)
-2. **Map** - Converts each pixel to the nearest color in Rust's 32-color palette (CIEDE2000 or RGB distance)
-3. **Dither** (optional) - Applies Floyd-Steinberg or ordered dithering for better visual quality
-4. **Group** - Groups pixels by color, sorts by frequency, orders within groups by nearest-neighbor
-5. **Capture** - User marks the canvas and palette regions on screen with hotkeys
-6. **Paint** - For each color group: selects color (palette click or hex input) → paints all pixels → checks for pause/cancel
+2. **Adjust** (optional) - Apply brightness, contrast, saturation, crop, rotation, and simplification filters
+3. **Map** - Converts each pixel to the nearest color in the palette (CIEDE2000 or RGB distance)
+4. **Dither** (optional) - Applies Floyd-Steinberg or ordered dithering for better visual quality
+5. **Plan** - Groups pixels by color, builds paint segments with line detection, optimizes path order
+6. **Capture** - User marks the canvas and palette regions on screen with hotkeys
+7. **Paint** - Executes the paint plan command-by-command with adaptive delays and pause/cancel support
 
 ## License
 

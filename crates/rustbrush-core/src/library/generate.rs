@@ -75,6 +75,7 @@ fn draw_line(img: &mut RgbaImage, x0: f32, y0: f32, x1: f32, y1: f32, thickness:
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn filled_triangle(
     img: &mut RgbaImage,
     x0: f32, y0: f32,
@@ -99,6 +100,7 @@ fn filled_triangle(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn point_in_triangle(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> bool {
     let d1 = sign(px, py, x0, y0, x1, y1);
     let d2 = sign(px, py, x1, y1, x2, y2);
@@ -196,7 +198,7 @@ pub fn radiation(w: u32, h: u32) -> RgbaImage {
                 let angle = dy.atan2(dx).to_degrees() + 180.0; // 0-360
                 // Three 60-degree sectors at 0, 120, 240
                 let sector = angle % 120.0;
-                if sector >= 10.0 && sector <= 70.0 {
+                if (10.0..=70.0).contains(&sector) {
                     img.put_pixel(px as u32, py as u32, BLACK);
                 }
             }
@@ -326,7 +328,7 @@ pub fn star(w: u32, h: u32) -> RgbaImage {
     // Generate 5-pointed star vertices
     let mut points = Vec::new();
     for i in 0..10 {
-        let angle = std::f32::consts::FRAC_PI_2 * -1.0 + std::f32::consts::PI * 2.0 * i as f32 / 10.0;
+        let angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * 2.0 * i as f32 / 10.0;
         let r = if i % 2 == 0 { r_outer } else { r_inner };
         points.push((cx + r * angle.cos(), cy + r * angle.sin()));
     }
@@ -489,7 +491,7 @@ fn draw_block_text(img: &mut RgbaImage, text: &str, color: Rgba<u8>, bg: Rgba<u8
                         // Scale up
                         for sy in 0..scale as u32 {
                             for sx in 0..scale as u32 {
-                                let px = ox + bit as u32 * scale as u32 + sx;
+                                let px = ox + bit * scale as u32 + sx;
                                 let py = start_y + row_idx as u32 * scale as u32 + sy;
                                 if px < w && py < h {
                                     img.put_pixel(px, py, color);
