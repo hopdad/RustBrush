@@ -4,6 +4,22 @@ All notable changes to RustBrush are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] - 2026-03-24
+
+### Added
+- Visual selection overlay during region capture — a semi-transparent green bounding box now appears in real-time as you click and drag to select canvas/palette areas
+- Comprehensive documentation: getting-started guide, user guide, CLI reference, canvas presets, strategies and quality, configuration, troubleshooting
+- LICENSE file (MIT)
+- CONTRIBUTING.md with build/test/PR instructions
+- CHANGELOG.md
+
+### Changed
+- Overlay is click-through so mouse events still reach the game
+- README updated with documentation links section
+
+### Removed
+- Linux support — RustBrush now targets Windows only (Rust the game is Windows-only)
+
 ## [0.1.0] - 2025-01-15
 
 ### Added
