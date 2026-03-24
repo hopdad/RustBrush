@@ -6,5 +6,7 @@ pub mod canvas;
 pub mod color;
 pub mod config;
 pub mod image;
+pub mod library;
 pub mod painting;
 pub mod session;
+pub mod text;

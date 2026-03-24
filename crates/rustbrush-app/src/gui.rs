@@ -8,8 +8,10 @@ use rustbrush_core::color::{
 };
 use rustbrush_core::config::Config;
 use rustbrush_core::image as rb_image;
+use rustbrush_core::library;
 use rustbrush_core::painting::{self, ColorGroup, PaintPlan, PaintStrategy, ScreenRect};
 use rustbrush_core::session::Session;
+use rustbrush_core::text::{self, TextAlign, TextConfig};
 use rustbrush_platform::executor::{self, ExecutionResult, ExecutorConfig, ProgressUpdate};
 use rustbrush_platform::hotkey::{PaintControl, region};
 use rustbrush_platform::input::{InputDriver, SafeInput};
@@ -127,6 +129,24 @@ struct RustBrushApp {
     calibration_rx: Option<mpsc::Receiver<CalibrationResult>>,
     calibrating: bool,
     calibration_label: String,
+
+    // Text builder state
+    show_text_builder: bool,
+    text_input: String,
+    text_font_size: f32,
+    text_color: [u8; 3],
+    text_bg_color: [u8; 3],
+    text_bg_transparent: bool,
+    text_alignment: TextAlign,
+    text_padding: u32,
+    system_fonts: Vec<(String, std::path::PathBuf)>,
+    selected_font_idx: usize,
+    text_preview_texture: Option<egui::TextureHandle>,
+
+    // Clipart library state
+    show_library: bool,
+    library_category_idx: usize,
+    library_thumbnails: Vec<Option<egui::TextureHandle>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,6 +351,24 @@ impl RustBrushApp {
             calibration_rx: None,
             calibrating: false,
             calibration_label: String::new(),
+
+            // Text builder
+            show_text_builder: false,
+            text_input: "Hello\nWorld".to_string(),
+            text_font_size: 48.0,
+            text_color: [255, 255, 255],
+            text_bg_color: [0, 0, 0],
+            text_bg_transparent: false,
+            text_alignment: TextAlign::Center,
+            text_padding: 8,
+            system_fonts: enumerate_system_fonts(),
+            selected_font_idx: 0,
+            text_preview_texture: None,
+
+            // Library
+            show_library: false,
+            library_category_idx: 0,
+            library_thumbnails: vec![None; library::all_items().len()],
         }
     }
 
@@ -1115,6 +1153,18 @@ impl eframe::App for RustBrushApp {
                         }
                         ui.close();
                     }
+                    if ui.button("Text Builder...").clicked() {
+                        self.show_text_builder = true;
+                        self.show_library = false;
+                        self.text_preview_texture = None;
+                        ui.close();
+                    }
+                    if ui.button("Clipart Library...").clicked() {
+                        self.show_library = true;
+                        self.show_text_builder = false;
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button("Save Preview...").clicked() {
                         if let Some(ref preview) = self.preview_image {
                             if let Some(path) =
@@ -1165,9 +1215,15 @@ impl eframe::App for RustBrushApp {
                 });
             });
 
-        // Central panel - image preview
+        // Central panel - image preview, text builder, or library
         egui::CentralPanel::default().show(ctx, |ui| {
-            self.preview_ui(ui, ctx);
+            if self.show_text_builder {
+                self.text_builder_ui(ui, ctx);
+            } else if self.show_library {
+                self.library_ui(ui, ctx);
+            } else {
+                self.preview_ui(ui, ctx);
+            }
         });
     }
 }
@@ -2155,6 +2211,296 @@ impl RustBrushApp {
             self.load_image(path);
         }
     }
+}
+
+// ── Text Builder UI ──────────────────────────────────────────────────
+
+impl RustBrushApp {
+    fn text_builder_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Text Builder");
+        ui.separator();
+
+        let mut changed = false;
+
+        ui.horizontal(|ui| {
+            ui.label("Font:");
+            let current_name = self
+                .system_fonts
+                .get(self.selected_font_idx)
+                .map(|(name, _)| name.as_str())
+                .unwrap_or("(none)");
+            egui::ComboBox::from_id_salt("font_selector")
+                .selected_text(current_name)
+                .width(250.0)
+                .show_ui(ui, |ui| {
+                    for (i, (name, _)) in self.system_fonts.iter().enumerate() {
+                        if ui
+                            .selectable_value(&mut self.selected_font_idx, i, name)
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Size:");
+            if ui
+                .add(egui::Slider::new(&mut self.text_font_size, 8.0..=200.0).suffix("px"))
+                .changed()
+            {
+                changed = true;
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Text color:");
+            if ui.color_edit_button_srgb(&mut self.text_color).changed() {
+                changed = true;
+            }
+            ui.separator();
+            ui.label("Background:");
+            if ui.checkbox(&mut self.text_bg_transparent, "Transparent").changed() {
+                changed = true;
+            }
+            if !self.text_bg_transparent {
+                if ui.color_edit_button_srgb(&mut self.text_bg_color).changed() {
+                    changed = true;
+                }
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Alignment:");
+            if ui
+                .selectable_value(&mut self.text_alignment, TextAlign::Left, "Left")
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .selectable_value(&mut self.text_alignment, TextAlign::Center, "Center")
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .selectable_value(&mut self.text_alignment, TextAlign::Right, "Right")
+                .changed()
+            {
+                changed = true;
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Padding:");
+            if ui
+                .add(egui::Slider::new(&mut self.text_padding, 0..=64).suffix("px"))
+                .changed()
+            {
+                changed = true;
+            }
+        });
+
+        ui.separator();
+        ui.label("Text (use Enter for new lines):");
+        if ui
+            .add(
+                egui::TextEdit::multiline(&mut self.text_input)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(4),
+            )
+            .changed()
+        {
+            changed = true;
+        }
+
+        // Render preview when settings change
+        if changed {
+            self.text_preview_texture = None;
+        }
+
+        ui.separator();
+
+        let cw = self.canvas_width();
+        let ch = self.canvas_height();
+        ui.small(format!("Preview at canvas size: {}x{}", cw, ch));
+
+        // Lazy render preview
+        if self.text_preview_texture.is_none() && !self.system_fonts.is_empty() {
+            if let Some(img) = self.render_text_preview() {
+                self.text_preview_texture = Some(upload_texture(ctx, "text_preview", &img));
+            }
+        }
+
+        // Show preview
+        if let Some(ref tex) = self.text_preview_texture {
+            let available = ui.available_size();
+            let size = fit_image_size(tex.size_vec2(), available.x, available.y - 40.0);
+            ui.image(egui::load::SizedTexture::new(tex.id(), size));
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Apply as Source Image").clicked() {
+                if let Some(img) = self.render_text_preview() {
+                    self.source_image = Some(img);
+                    self.image_path = None;
+                    self.source_texture = None;
+                    self.preview_texture = None;
+                    self.preview_image = None;
+                    self.mapped_pixels = None;
+                    self.paint_groups = None;
+                    self.paint_plan = None;
+                    self.last_pixel_count = None;
+                    self.last_color_count = None;
+                    self.update_time_estimate();
+                    self.mark_settings_changed(true);
+                    self.status_message = "Text image applied. Processing...".to_string();
+                    self.show_text_builder = false;
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                self.show_text_builder = false;
+            }
+        });
+    }
+
+    fn render_text_preview(&self) -> Option<image::RgbaImage> {
+        let (_, font_path) = self.system_fonts.get(self.selected_font_idx)?;
+        let font_data = std::fs::read(font_path).ok()?;
+        let bg_color = if self.text_bg_transparent {
+            [0, 0, 0, 0]
+        } else {
+            [self.text_bg_color[0], self.text_bg_color[1], self.text_bg_color[2], 255]
+        };
+        let config = TextConfig {
+            text: self.text_input.clone(),
+            font_data,
+            font_size: self.text_font_size,
+            text_color: [self.text_color[0], self.text_color[1], self.text_color[2], 255],
+            bg_color,
+            alignment: self.text_alignment,
+            padding: self.text_padding,
+        };
+        text::render_text(&config, self.canvas_width(), self.canvas_height()).ok()
+    }
+}
+
+// ── Clipart Library UI ──────────────────────────────────────────────
+
+impl RustBrushApp {
+    fn library_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Clipart Library");
+        ui.small("Click an image to use it as the source image.");
+        ui.separator();
+
+        let categories = library::categories();
+
+        // Category tabs
+        ui.horizontal_wrapped(|ui| {
+            for (i, cat) in categories.iter().enumerate() {
+                if ui
+                    .selectable_label(self.library_category_idx == i, *cat)
+                    .clicked()
+                {
+                    self.library_category_idx = i;
+                }
+            }
+        });
+        ui.separator();
+
+        let items = library::all_items();
+        let cat = categories.get(self.library_category_idx).copied().unwrap_or("");
+        let filtered: Vec<(usize, &library::LibraryItem)> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.category == cat)
+            .collect();
+
+        // Grid of thumbnails
+        let thumb_size = 80.0;
+        let mut selected_idx: Option<usize> = None;
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (global_idx, item) in &filtered {
+                    // Lazy-load thumbnails
+                    if self.library_thumbnails[*global_idx].is_none() {
+                        let thumb = item.thumbnail();
+                        self.library_thumbnails[*global_idx] =
+                            Some(upload_texture(ctx, &format!("lib_{}", global_idx), &thumb));
+                    }
+
+                    ui.vertical(|ui| {
+                        if let Some(ref tex) = self.library_thumbnails[*global_idx] {
+                            let response = ui.add(
+                                egui::Image::new(egui::load::SizedTexture::new(
+                                    tex.id(),
+                                    egui::vec2(thumb_size, thumb_size),
+                                ))
+                                .sense(egui::Sense::click()),
+                            );
+                            if response.clicked() {
+                                selected_idx = Some(*global_idx);
+                            }
+                            response.on_hover_text(item.name);
+                        }
+                        ui.small(item.name);
+                    });
+                }
+            });
+        });
+
+        // Handle selection
+        if let Some(idx) = selected_idx {
+            let item = &items[idx];
+            let cw = self.canvas_width();
+            let ch = self.canvas_height();
+            let img = item.render(cw, ch);
+            self.source_image = Some(img);
+            self.image_path = None;
+            self.source_texture = None;
+            self.preview_texture = None;
+            self.preview_image = None;
+            self.mapped_pixels = None;
+            self.paint_groups = None;
+            self.paint_plan = None;
+            self.last_pixel_count = None;
+            self.last_color_count = None;
+            self.update_time_estimate();
+            self.mark_settings_changed(true);
+            self.status_message = format!("Loaded '{}' from library. Processing...", item.name);
+            self.show_library = false;
+        }
+
+        ui.separator();
+        if ui.button("Close").clicked() {
+            self.show_library = false;
+        }
+    }
+}
+
+// ── System font discovery ───────────────────────────────────────────
+
+fn enumerate_system_fonts() -> Vec<(String, std::path::PathBuf)> {
+    let mut fonts = Vec::new();
+
+    if let Ok(source) = font_kit::source::SystemSource::new().all_fonts() {
+        for handle in source {
+            if let font_kit::handle::Handle::Path { path, font_index: 0 } = handle {
+                if let Some(stem) = path.file_stem() {
+                    let name = stem.to_string_lossy().to_string();
+                    fonts.push((name, path));
+                }
+            }
+        }
+    }
+
+    fonts.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    fonts.dedup_by(|a, b| a.0 == b.0);
+    fonts
 }
 
 fn upload_texture(
