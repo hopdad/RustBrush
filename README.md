@@ -122,6 +122,18 @@ rustbrush myimage.png --resume session.json --accept-risk
 rustbrush myimage.png --preview preview.png --dry-run
 ```
 
+## Documentation
+
+- **[Getting Started](docs/getting-started.md)** — Install and paint your first sign
+- **[User Guide](docs/user-guide.md)** — Full GUI walkthrough
+- **[CLI Reference](docs/cli-reference.md)** — All command-line flags and examples
+- **[Canvas Presets](docs/canvas-presets.md)** — All 18 sign types with dimensions
+- **[Strategies and Quality](docs/strategies-and-quality.md)** — Painting strategies, color matching, dithering, quality presets
+- **[Configuration](docs/config.md)** — Config file location, fields, and defaults
+- **[Troubleshooting](docs/troubleshooting.md)** — Common problems and solutions
+- **[Contributing](CONTRIBUTING.md)** — Build, test, and submit changes
+- **[Changelog](CHANGELOG.md)** — Release history
+
 ## Architecture
 
 RustBrush is organized as a three-crate Cargo workspace:
