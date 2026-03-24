@@ -103,6 +103,7 @@ pub mod region {
     }
 
     /// Wait for user to press a key, then click-drag to define a rectangular region.
+    /// Displays a visual overlay rectangle during the drag on supported platforms.
     pub fn capture_region_interactive(label: &str, key: Keycode) -> Result<ScreenRegion, String> {
         let device_state = DeviceState::new();
 
@@ -115,7 +116,7 @@ pub mod region {
         let p1 = wait_for_mouse_down(&device_state)?;
         println!("  Start: ({}, {})", p1.0, p1.1);
 
-        let p2 = wait_for_mouse_up(&device_state)?;
+        let p2 = wait_for_mouse_up_with_overlay(&device_state, p1)?;
         println!("  End:   ({}, {})", p2.0, p2.1);
 
         let x = p1.0.min(p2.0);
@@ -209,6 +210,41 @@ pub mod region {
 
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Wait for mouse release while showing a visual overlay rectangle.
+    /// The overlay tracks the mouse position in real-time during the drag.
+    fn wait_for_mouse_up_with_overlay(
+        device_state: &DeviceState,
+        anchor: (i32, i32),
+    ) -> Result<(i32, i32), String> {
+        let mut overlay = crate::overlay::create_overlay();
+
+        let result = loop {
+            if device_state.get_keys().contains(&Keycode::Escape) {
+                break Err("Cancelled by user".into());
+            }
+
+            let mouse = device_state.get_mouse();
+
+            // Update the overlay rectangle with current mouse position.
+            if let Some(ref mut ov) = overlay {
+                ov.update(anchor.0, anchor.1, mouse.coords.0, mouse.coords.1);
+            }
+
+            if !is_left_button_pressed(device_state) {
+                break Ok((mouse.coords.0, mouse.coords.1));
+            }
+
+            std::thread::sleep(Duration::from_millis(16)); // ~60fps
+        };
+
+        // Clean up overlay in all exit paths.
+        if let Some(mut ov) = overlay {
+            ov.destroy();
+        }
+
+        result
     }
 
     fn is_left_button_pressed(device_state: &DeviceState) -> bool {
