@@ -457,6 +457,207 @@ fn nearest_neighbor_order(pixels: &[(u32, u32)]) -> Vec<(u32, u32)> {
     result
 }
 
+/// Two-pass painter: coarse fill with large brush, then detail with brush size 1.
+///
+/// Pass 1: For each color group, finds NxN blocks that are entirely one color
+/// and paints them with a single click using brush size N.
+/// Pass 2: Remaining pixels are painted at brush size 1 using the inner strategy.
+pub struct TwoPassPlanner {
+    /// Brush size for the coarse fill pass (2..=100).
+    pub coarse_brush_size: u32,
+    /// Screen position of the brush size input field.
+    pub size_field_pos: (i32, i32),
+    /// The inner strategy used for detail pass ordering.
+    pub detail_strategy: Box<dyn PaintStrategy>,
+}
+
+impl TwoPassPlanner {
+    /// Generate a two-pass paint plan.
+    ///
+    /// `all_pixel_colors` maps every (x,y) in the image to its assigned color.
+    /// This is needed to verify that NxN blocks are entirely one color.
+    pub fn plan(
+        &self,
+        groups: &[ColorGroup],
+        canvas: &ScreenRect,
+        img_width: u32,
+        img_height: u32,
+        use_hex: bool,
+        color_switch_delay_ms: u32,
+        all_pixel_colors: &std::collections::HashMap<(u32, u32), (u8, u8, u8)>,
+    ) -> PaintPlan {
+        let total_pixels: usize = groups.iter().map(|g| g.pixels.len()).sum();
+        let n = self.coarse_brush_size;
+        let mut commands = Vec::new();
+
+        // Collect coarse clicks and detail pixels per group
+        let mut coarse_groups: Vec<(&ColorGroup, Vec<(u32, u32)>)> = Vec::new();
+        let mut detail_groups: Vec<ColorGroup> = Vec::new();
+
+        for group in groups {
+            let analysis = analyze_coarse_blocks(
+                &group.pixels,
+                all_pixel_colors,
+                group.color,
+                n,
+                img_width,
+                img_height,
+            );
+            if !analysis.coarse_clicks.is_empty() {
+                coarse_groups.push((group, analysis.coarse_clicks));
+            }
+            if !analysis.detail_pixels.is_empty() {
+                detail_groups.push(ColorGroup {
+                    color: group.color,
+                    hex: group.hex.clone(),
+                    pixels: analysis.detail_pixels,
+                });
+            }
+        }
+
+        // === Pass 1: Coarse fill ===
+        if !coarse_groups.is_empty() {
+            // Set brush size to N
+            commands.push(PaintCommand::MoveTo {
+                x: self.size_field_pos.0,
+                y: self.size_field_pos.1,
+            });
+            commands.push(PaintCommand::SetBrushSize { size: n });
+            commands.push(PaintCommand::Delay { ms: 50 });
+
+            for (group, coarse_clicks) in &coarse_groups {
+                if use_hex {
+                    commands.push(PaintCommand::SelectColorByHex { hex: group.hex.clone() });
+                }
+                commands.push(PaintCommand::Delay { ms: color_switch_delay_ms });
+
+                // Order coarse clicks by nearest-neighbor for less mouse travel
+                let ordered = nearest_neighbor_order(coarse_clicks);
+                for (px, py) in ordered {
+                    let (sx, sy) = pixel_to_screen(px, py, img_width, img_height, canvas);
+                    commands.push(PaintCommand::MoveTo { x: sx, y: sy });
+                    commands.push(PaintCommand::Click);
+                }
+            }
+        }
+
+        // === Pass 2: Detail at brush size 1 ===
+        if !detail_groups.is_empty() {
+            // Set brush size back to 1
+            commands.push(PaintCommand::MoveTo {
+                x: self.size_field_pos.0,
+                y: self.size_field_pos.1,
+            });
+            commands.push(PaintCommand::SetBrushSize { size: 1 });
+            commands.push(PaintCommand::Delay { ms: 50 });
+
+            // Use inner strategy for detail pass
+            let detail_plan = self.detail_strategy.plan(
+                &detail_groups,
+                canvas,
+                img_width,
+                img_height,
+                use_hex,
+                color_switch_delay_ms,
+            );
+            commands.extend(detail_plan.commands);
+        }
+
+        PaintPlan {
+            metadata: PlanMetadata {
+                total_pixels,
+                total_colors: groups.len(),
+                total_commands: commands.len(),
+                strategy_name: format!("two-pass({}+{})", n, self.detail_strategy.name()),
+                optimization_improvement: None,
+            },
+            commands,
+        }
+    }
+}
+
+/// Result of coarse block analysis for a single color group.
+struct CoarseAnalysis {
+    /// Center points of NxN blocks that can be painted with one coarse click.
+    coarse_clicks: Vec<(u32, u32)>,
+    /// Pixels not covered by any coarse block (need detail painting).
+    detail_pixels: Vec<(u32, u32)>,
+}
+
+/// Analyze which NxN blocks within a color group are entirely one color.
+///
+/// Sweeps non-overlapping NxN blocks across the image. If every pixel in a block
+/// matches `target_color`, the block center becomes a coarse click and all pixels
+/// are marked as covered. Remaining pixels go to the detail list.
+fn analyze_coarse_blocks(
+    group_pixels: &[(u32, u32)],
+    all_pixel_colors: &std::collections::HashMap<(u32, u32), (u8, u8, u8)>,
+    target_color: (u8, u8, u8),
+    brush_size: u32,
+    img_width: u32,
+    img_height: u32,
+) -> CoarseAnalysis {
+    let group_set: std::collections::HashSet<(u32, u32)> =
+        group_pixels.iter().cloned().collect();
+    let mut covered: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    let mut coarse_clicks = Vec::new();
+    let n = brush_size;
+
+    // Sweep non-overlapping NxN blocks
+    let mut by = 0;
+    while by + n <= img_height {
+        let mut bx = 0;
+        while bx + n <= img_width {
+            // Check if ALL pixels in this NxN block are the target color
+            let mut all_match = true;
+            'block: for dy in 0..n {
+                for dx in 0..n {
+                    let pos = (bx + dx, by + dy);
+                    // Must be in this color group AND match the target color
+                    if !group_set.contains(&pos) {
+                        all_match = false;
+                        break 'block;
+                    }
+                    if let Some(&color) = all_pixel_colors.get(&pos) {
+                        if color != target_color {
+                            all_match = false;
+                            break 'block;
+                        }
+                    } else {
+                        all_match = false;
+                        break 'block;
+                    }
+                }
+            }
+
+            if all_match {
+                // Click at center of the NxN block
+                let cx = bx + n / 2;
+                let cy = by + n / 2;
+                coarse_clicks.push((cx, cy));
+                for dy in 0..n {
+                    for dx in 0..n {
+                        covered.insert((bx + dx, by + dy));
+                    }
+                }
+            }
+            bx += n;
+        }
+        by += n;
+    }
+
+    let detail_pixels: Vec<(u32, u32)> = group_pixels
+        .iter()
+        .filter(|p| !covered.contains(p))
+        .cloned()
+        .collect();
+
+    CoarseAnalysis {
+        coarse_clicks,
+        detail_pixels,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,6 +842,64 @@ mod tests {
             .filter(|s| matches!(s, PaintSegment::HLine { .. }))
             .collect();
         assert_eq!(lines.len(), 3, "Should detect 3 horizontal line segments (one per row)");
+    }
+
+    #[test]
+    fn test_analyze_coarse_blocks_uniform() {
+        // 4x4 image, all red, brush size 2 -> 4 coarse blocks, 0 detail
+        let color = (255, 0, 0);
+        let mut pixels = Vec::new();
+        let mut all_colors = std::collections::HashMap::new();
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                pixels.push((x, y));
+                all_colors.insert((x, y), color);
+            }
+        }
+        let result = analyze_coarse_blocks(&pixels, &all_colors, color, 2, 4, 4);
+        assert_eq!(result.coarse_clicks.len(), 4);
+        assert_eq!(result.detail_pixels.len(), 0);
+    }
+
+    #[test]
+    fn test_analyze_coarse_blocks_mixed() {
+        // 4x4 image, mostly red but (1,1) is blue -> only 3 of 4 blocks are pure red
+        let red = (255, 0, 0);
+        let blue = (0, 0, 255);
+        let mut red_pixels = Vec::new();
+        let mut all_colors = std::collections::HashMap::new();
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                if x == 1 && y == 1 {
+                    all_colors.insert((x, y), blue);
+                } else {
+                    red_pixels.push((x, y));
+                    all_colors.insert((x, y), red);
+                }
+            }
+        }
+        let result = analyze_coarse_blocks(&red_pixels, &all_colors, red, 2, 4, 4);
+        // Block (0,0)-(1,1) has a blue pixel at (1,1), so not fully red
+        assert_eq!(result.coarse_clicks.len(), 3);
+        // 3 red pixels in the broken block become detail
+        assert_eq!(result.detail_pixels.len(), 3);
+    }
+
+    #[test]
+    fn test_analyze_coarse_blocks_not_divisible() {
+        // 5x5 image, all red, brush size 2 -> 4 coarse blocks (covers 4x4), 9 detail pixels on edges
+        let color = (255, 0, 0);
+        let mut pixels = Vec::new();
+        let mut all_colors = std::collections::HashMap::new();
+        for y in 0..5u32 {
+            for x in 0..5u32 {
+                pixels.push((x, y));
+                all_colors.insert((x, y), color);
+            }
+        }
+        let result = analyze_coarse_blocks(&pixels, &all_colors, color, 2, 5, 5);
+        assert_eq!(result.coarse_clicks.len(), 4); // 4 blocks in 4x4 area
+        assert_eq!(result.detail_pixels.len(), 9); // row 4 (5 px) + column 4 rows 0-3 (4 px)
     }
 
     #[test]

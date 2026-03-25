@@ -57,6 +57,10 @@ pub struct Config {
     pub median_radius: u32,
     /// Enable 2-opt path optimization for segment ordering.
     pub path_optimizer: bool,
+    /// Enable two-pass painting (coarse fill + detail).
+    pub two_pass_enabled: bool,
+    /// Brush size for the coarse fill pass (2-100).
+    pub coarse_brush_size: u32,
 }
 
 impl Default for Config {
@@ -86,6 +90,8 @@ impl Default for Config {
             median_enabled: false,
             median_radius: 1,
             path_optimizer: true,
+            two_pass_enabled: false,
+            coarse_brush_size: 8,
         }
     }
 }

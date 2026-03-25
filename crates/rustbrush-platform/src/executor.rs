@@ -243,6 +243,18 @@ fn execute_command(cmd: &PaintCommand, input: &mut dyn InputDriver) -> Result<()
             input.move_to(*x, *y)?;
             input.click()
         }
+        PaintCommand::SetBrushSize { size } => {
+            // Same pattern as hex color input: click field, select all, type, enter
+            input.click()?;
+            std::thread::sleep(Duration::from_millis(30));
+            input.select_all()?;
+            std::thread::sleep(Duration::from_millis(20));
+            input.type_text(&size.to_string())?;
+            std::thread::sleep(Duration::from_millis(20));
+            input.press_key_return()?;
+            std::thread::sleep(Duration::from_millis(30));
+            Ok(())
+        }
         PaintCommand::Delay { ms } => {
             std::thread::sleep(Duration::from_millis(*ms as u64));
             Ok(())

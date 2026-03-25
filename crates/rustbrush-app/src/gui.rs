@@ -122,6 +122,9 @@ struct RustBrushApp {
     // Canvas region (screen coordinates for painting)
     canvas_region: Option<ScreenRect>,
     hex_field_pos: Option<(i32, i32)>,
+    size_field_pos: Option<(i32, i32)>,
+    two_pass_enabled: bool,
+    coarse_brush_size: u32,
     resume_index: usize,
 
     // Scanned palette state
@@ -282,6 +285,7 @@ enum CalibrationResult {
     CanvasRegion(Result<region::ScreenRegion, String>),
     HexFieldPoint(Result<(i32, i32), String>),
     PaletteRegion(Result<(region::ScreenRegion, Vec<PaletteEntry>), String>),
+    SizeFieldPoint(Result<(i32, i32), String>),
 }
 
 /// Result sent back from the background processing thread.
@@ -374,6 +378,9 @@ impl RustBrushApp {
 
             canvas_region: None,
             hex_field_pos: None,
+            size_field_pos: None,
+            two_pass_enabled: config.two_pass_enabled,
+            coarse_brush_size: config.coarse_brush_size,
             resume_index: 0,
 
             gif_frames: None,
@@ -474,6 +481,8 @@ impl RustBrushApp {
             median_radius: self.median_radius,
             path_optimizer: self.path_optimizer,
             quality_preset: self.quality_preset.as_config_str().to_string(),
+            two_pass_enabled: self.two_pass_enabled,
+            coarse_brush_size: self.coarse_brush_size,
         };
         let _ = config.save_default();
     }
@@ -597,14 +606,41 @@ impl RustBrushApp {
 
         // Generate color selection commands when using hex, adaptive, or scanned palette
         let need_color_selection = self.hex_input || self.adaptive_palette || self.scanned_palette.is_some();
-        let mut plan = strategy.plan(
-            groups,
-            &canvas,
-            self.canvas_width(),
-            self.canvas_height(),
-            need_color_selection,
-            30,
-        );
+
+        let mut plan = if self.two_pass_enabled {
+            // Build pixel color map from mapped_pixels for coarse block analysis
+            let mut all_pixel_colors = std::collections::HashMap::new();
+            if let Some(ref mapped) = self.mapped_pixels {
+                for mp in mapped {
+                    all_pixel_colors.insert((mp.x, mp.y), (mp.color.r, mp.color.g, mp.color.b));
+                }
+            }
+
+            let size_pos = self.size_field_pos.unwrap_or((0, 0));
+            let planner = painting::TwoPassPlanner {
+                coarse_brush_size: self.coarse_brush_size,
+                size_field_pos: size_pos,
+                detail_strategy: strategy,
+            };
+            planner.plan(
+                groups,
+                &canvas,
+                self.canvas_width(),
+                self.canvas_height(),
+                need_color_selection,
+                30,
+                &all_pixel_colors,
+            )
+        } else {
+            strategy.plan(
+                groups,
+                &canvas,
+                self.canvas_width(),
+                self.canvas_height(),
+                need_color_selection,
+                30,
+            )
+        };
 
         // When using scanned palette without hex mode, replace hex commands with clicks
         if self.use_palette_clicks() {
@@ -1058,6 +1094,24 @@ impl RustBrushApp {
         });
     }
 
+    /// Start interactive brush size field point capture on a background thread.
+    fn start_size_field_capture(&mut self) {
+        if self.calibrating {
+            return;
+        }
+        self.calibrating = true;
+        self.calibration_label = "Size Field".to_string();
+        self.status_message = "Press F6, then click on the brush size input field. ESC to cancel.".to_string();
+
+        let (tx, rx) = mpsc::channel();
+        self.calibration_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let result = region::capture_point_interactive("Brush Size Field", device_query::Keycode::F6);
+            let _ = tx.send(CalibrationResult::SizeFieldPoint(result));
+        });
+    }
+
     /// Start interactive palette region capture on a background thread.
     fn start_palette_capture(&mut self) {
         if self.calibrating {
@@ -1209,6 +1263,15 @@ impl eframe::App for RustBrushApp {
                     }
                     CalibrationResult::PaletteRegion(Err(e)) => {
                         self.status_message = format!("Palette capture cancelled: {}", e);
+                    }
+                    CalibrationResult::SizeFieldPoint(Ok((x, y))) => {
+                        self.size_field_pos = Some((x, y));
+                        self.status_message = format!(
+                            "Brush size field position set: ({}, {})", x, y
+                        );
+                    }
+                    CalibrationResult::SizeFieldPoint(Err(e)) => {
+                        self.status_message = format!("Size field capture cancelled: {}", e);
                     }
                 }
             }
@@ -1804,6 +1867,40 @@ impl RustBrushApp {
                     });
 
                     if let Some((x, y)) = self.hex_field_pos {
+                        ui.small(format!("  Position: ({}, {})", x, y));
+                    }
+                }
+
+                // Two-pass painting (coarse fill + detail)
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut self.two_pass_enabled, "Two-pass painting")
+                        .on_hover_text("Use a large brush for uniform regions first, then size 1 for detail")
+                        .changed()
+                    {
+                        self.pending_reprocess = true;
+                        self.last_settings_change = Instant::now();
+                    }
+                });
+                if self.two_pass_enabled {
+                    ui.horizontal(|ui| {
+                        ui.label("Coarse brush size:");
+                        ui.add(
+                            egui::DragValue::new(&mut self.coarse_brush_size)
+                                .range(2..=100u32)
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Select Size Field (F6)")
+                            .on_hover_text("Press F6, then click on the brush size input field in-game")
+                            .clicked()
+                        {
+                            self.start_size_field_capture();
+                        }
+                        if self.size_field_pos.is_some() {
+                            ui.label("Set");
+                        }
+                    });
+                    if let Some((x, y)) = self.size_field_pos {
                         ui.small(format!("  Position: ({}, {})", x, y));
                     }
                 }

@@ -7,7 +7,7 @@ mod strategy;
 mod delay;
 pub(crate) mod optimizer;
 
-pub use strategy::{PaintStrategy, ScanlineStrategy, ColorGroupedStrategy, LineDrawStrategy, HybridStrategy};
+pub use strategy::{PaintStrategy, ScanlineStrategy, ColorGroupedStrategy, LineDrawStrategy, HybridStrategy, TwoPassPlanner};
 pub use delay::AdaptiveDelay;
 pub use optimizer::OptimizeResult;
 
@@ -28,6 +28,8 @@ pub enum PaintCommand {
     SelectColorByHex { hex: String },
     /// Select a color by clicking a palette position.
     SelectColorByClick { x: i32, y: i32 },
+    /// Set the in-game brush size by typing into the size input field.
+    SetBrushSize { size: u32 },
     /// Wait for a specified duration.
     Delay { ms: u32 },
 }

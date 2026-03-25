@@ -115,6 +115,12 @@ struct Cli {
     /// Save session progress for crash recovery (auto-save path)
     #[arg(long)]
     save_session: bool,
+
+    /// Coarse brush size for two-pass painting (2-100). Enables a fast first pass
+    /// with a large brush for uniform regions, then a detail pass with size 1.
+    /// Set to 0 to disable (default).
+    #[arg(long, default_value_t = 0)]
+    coarse_brush: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -308,6 +314,18 @@ fn main() {
         None
     };
 
+    let size_field_pos = if cli.coarse_brush >= 2 {
+        match region::capture_point_interactive("Brush size input field", Keycode::F6) {
+            Ok(pos) => Some(pos),
+            Err(e) => {
+                eprintln!("Size field capture failed: {}", e);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     let palette_region = match region::capture_region_interactive("Palette", Keycode::F8) {
         Ok(r) => r,
         Err(e) => {
@@ -337,11 +355,30 @@ fn main() {
     };
     let use_hex = hex_input_pos.is_some();
     let strategy = build_strategy(cli.strategy);
-    let plan = strategy.plan(
-        &paint_groups, &screen_rect,
-        cli.canvas_width, cli.canvas_height,
-        use_hex, 30,
-    );
+    let plan = if let Some(size_pos) = size_field_pos {
+        // Two-pass painting: coarse fill + detail
+        let mut all_pixel_colors = std::collections::HashMap::new();
+        for mp in &pixel_plan {
+            all_pixel_colors.insert((mp.x, mp.y), (mp.color.r, mp.color.g, mp.color.b));
+        }
+        let planner = painting::TwoPassPlanner {
+            coarse_brush_size: cli.coarse_brush,
+            size_field_pos: size_pos,
+            detail_strategy: strategy,
+        };
+        planner.plan(
+            &paint_groups, &screen_rect,
+            cli.canvas_width, cli.canvas_height,
+            use_hex, 30,
+            &all_pixel_colors,
+        )
+    } else {
+        strategy.plan(
+            &paint_groups, &screen_rect,
+            cli.canvas_width, cli.canvas_height,
+            use_hex, 30,
+        )
+    };
 
     println!(
         "\nPlan: {} commands ({} strategy), est. {:.0}s",
