@@ -431,7 +431,9 @@ impl RustBrushApp {
     }
 
     fn canvas_width(&self) -> u32 {
-        if self.use_custom_size {
+        if let Some(ref region) = self.canvas_region {
+            region.width
+        } else if self.use_custom_size {
             self.custom_width
         } else {
             canvas::all_presets()[self.canvas_preset_idx].width
@@ -439,7 +441,9 @@ impl RustBrushApp {
     }
 
     fn canvas_height(&self) -> u32 {
-        if self.use_custom_size {
+        if let Some(ref region) = self.canvas_region {
+            region.height
+        } else if self.use_custom_size {
             self.custom_height
         } else {
             canvas::all_presets()[self.canvas_preset_idx].height
@@ -586,6 +590,10 @@ impl RustBrushApp {
             self.status_message = "Process the image first.".to_string();
             return;
         };
+        if groups.is_empty() {
+            self.status_message = "No pixels to paint.".to_string();
+            return;
+        }
 
         let canvas = ScreenRect {
             x: 0,
@@ -1206,10 +1214,14 @@ impl eframe::App for RustBrushApp {
                     self.processing = false;
                     self.bg_result_rx = None;
                     self.update_time_estimate();
-                    self.status_message = format!(
-                        "Processed: {}x{}, {} colors, {} pixels.",
-                        w, h, total_colors, total_pixels
-                    );
+                    // Auto-generate plan after processing
+                    self.generate_plan();
+                    if self.paint_plan.is_none() {
+                        self.status_message = format!(
+                            "Processed: {}x{}, {} colors, {} pixels.",
+                            w, h, total_colors, total_pixels
+                        );
+                    }
                 } else {
                     // Stale result — discard and re-queue
                     self.processing = false;
@@ -1230,9 +1242,14 @@ impl eframe::App for RustBrushApp {
                             x: r.x, y: r.y, width: r.width, height: r.height,
                         });
                         self.status_message = format!(
-                            "Canvas region set: {}x{} at ({}, {})",
+                            "Canvas region set: {}x{} at ({}, {}). Image will be fit to this size.",
                             r.width, r.height, r.x, r.y
                         );
+                        // Reprocess image to fit the new canvas dimensions
+                        if self.source_image.is_some() {
+                            self.pending_reprocess = true;
+                            self.last_settings_change = Instant::now();
+                        }
                     }
                     CalibrationResult::CanvasRegion(Err(e)) => {
                         self.status_message = format!("Canvas capture cancelled: {}", e);
@@ -1755,7 +1772,6 @@ impl RustBrushApp {
 
         let has_image = self.source_image.is_some();
         let has_groups = self.paint_groups.is_some();
-        let has_plan = self.paint_plan.is_some();
 
         ui.add_enabled_ui(has_image && !self.processing && !self.painting_active, |ui| {
             if ui
@@ -1794,7 +1810,7 @@ impl RustBrushApp {
         }
 
         // --- Calibration & Paint Setup ---
-        if has_plan && !self.painting_active {
+        if !self.painting_active {
             ui.separator();
             ui.heading("Calibration");
 
@@ -1952,6 +1968,7 @@ impl RustBrushApp {
 
             // Start painting button
             let can_start = self.canvas_region.is_some()
+                && self.paint_plan.is_some()
                 && self.countdown_start.is_none()
                 && !self.calibrating;
             ui.add_enabled_ui(can_start, |ui| {
